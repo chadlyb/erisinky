@@ -4,15 +4,7 @@
 
 inkserve (Go) starts `inkling serve` (Rust) as a child process and talks to it over its stdin and stdout. If the engine exits, inkserve exits with status 1, so a supervisor can restart both. Closing the engine's stdin stops it.
 
-The engine side is one new file, [src/serve.rs](../src/serve.rs), plus changes to erisinky's other files ([PATCH.md](PATCH.md) lists them part by part). The changes add:
-- the `serve` command (three lines in `main.rs`)
-- the NV4 and MX8 expert types and Q8_0 attention, embedding and output head, so the engine can run weights close to the release ([NATIVE.md](NATIVE.md))
-- Q8_0 gate/up experts, so the plain Q8_0 GGUF loads (used as a control in drift tests)
-- decode kernels tuned for these types: 4 lanes per block in `dot_q8`, `dot_nv4`, `dot_mx8` and the NV4/MX8 branches of `k_moe_down` (switch: `NV4_BAL` in `kernels.metal`)
-- sampling on the GPU: `k_gumbel`, `k_sampstate`, `Engine::samp` and `encode_sample` (Sampling, below)
-- a verify pass for speculative decoding: `Engine::encode_verify` / `verify_logits`, with small-T kernels (`k_mvT`, `k_moe_routeT` / `guT` / `downT`, `k_attn_hs`), and two dev commands, `prof_verify` and `kcheck` ([DSPARK.md](DSPARK.md))
-
-The patch is about 1,000 lines, half of them the verify pass and its dev tools. It touches weight decoding, the loader, sampling and new kernel paths, and leaves erisinky's existing paths alone, so upstream speed-ups stay easy to pick up:
+The engine side is [src/serve.rs](../src/serve.rs). The engine changes it relies on (native weights, GPU sampling, the verify pass, DSpark) are listed in [MYCHANGES.md](../MYCHANGES.md). Two invariants keep upstream speed-ups easy to pick up:
 - Q4_K_M's logits are bit-identical to stock erisinky.
 - Prefill is bit-identical with and without the verify kernels, which run only inside `encode_verify`.
 
@@ -66,7 +58,7 @@ There are two paths. Both draw from softmax(softcap(logits) / temperature) and a
   - Standard speculative sampling keeps the output distribution exact.
   - The CPU applies the thinking budget, eos and the token limit to the accepted tokens. Rejected positions are rolled back.
   - It falls back to stretches of chained-style plain steps while no draft depth beats a plain step.
-  - See [DSPARK.md](DSPARK.md) → DSpark in the engine's serve loop.
+  - See [DSPARK.md](../DSPARK.md) → DSpark in the engine's serve loop.
 - **CPU** (`Pick`): used with top-k or top-p, or with `INKSERVE_CPU_SAMPLE=1`. It reads the logits back after each step, ignoring tokens more than 30 nats below the best. A raw-logit pre-filter keeps `tanh` off the rest. This costs ~1 ms per token: the sampler itself, plus the GPU idling while the CPU samples.
 
 The paths use different random streams, so a given seed gives different replies on each. `engine/sample_test.py` checks they draw the same distribution. The noise's uniform `u` uses 23 random bits plus a half step, which float holds exactly. With 24 bits, the top value rounds to 1.0, the noise becomes infinite, and a random token wins on ~1% of steps. The test's temperature-0.01 check catches that.

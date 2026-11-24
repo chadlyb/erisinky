@@ -87,7 +87,7 @@ W_f = output head · `hidden_out.weight` ([V, 256]) and b_f = output head · `hi
     - Two prefills split at 512 and at 96 tokens give identical taps, bit for bit. Prefill doesn't depend on the split, so the row-to-position mapping is right.
     - Prefill against decode steps: feature 0 matches to 2–3 × 10⁻⁴. The deeper features differ by 0.6–15%, growing with depth. That's the model amplifying rounding through its looped core (the same effect behind the 6–8% top-1 gap between the two paths), and it affects acceptance, not correctness.
 
-- **Drafter weights (2026-11-23):** `inkconvert mtp -in mtp.safetensors -official model-00001-of-00001.safetensors -out Inkling-2-Mini-dspark.gguf` (`cmd/inkconvert/mtp.go`). It took 4.8 s on the M5 Pro and wrote 445 MB (`/Volumes/TB5/llm/inkling-speed/Inkling-2-Mini-dspark.gguf`). Tensors, named `mtp.<layer>.<name>` and `mtp.markov.*`:
+- **Drafter weights (2026-11-23):** `inkconvert mtp -in mtp.safetensors -official model-00001-of-00001.safetensors -out Inkling-2-Mini-dspark.gguf` (`tools/inkconvert/mtp.go`). It took 4.8 s on the M5 Pro and wrote 445 MB (`/Volumes/TB5/llm/inkling-speed/Inkling-2-Mini-dspark.gguf`). Tensors, named `mtp.<layer>.<name>` and `mtp.markov.*`:
   - Q8_0: the 9 projections per layer, and the folded head `fold_w` [201,024 × 256]
   - BF16: the Markov embedding `w1` and `rnn`
   - F32: norms, `mask_embed`, biases, and `alpha` = softmax(`fuse_weight`), 4 × 4

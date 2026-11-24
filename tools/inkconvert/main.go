@@ -8,7 +8,7 @@
 //
 // probe checks this tool's reading of the official layout (nibble order, gate/up row order, global scale) against
 // the Q8_0 GGUF, which llama.cpp converted from the same checkpoint. verify compares a converted file's experts
-// with the Q8_0 file the same way. See docs/NATIVE.md.
+// with the Q8_0 file the same way. See NATIVE.md at the repository root.
 package main
 
 import (

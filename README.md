@@ -3,20 +3,23 @@
 A from-scratch inference engine for **Thinking Machines' Inkling 2 Mini** (`inkling2_loop`, 26.4B total / 3.4B active MoE)
 on Apple Silicon: Rust host + hand-fused Metal kernels, reading the LM Studio GGUF directly (zero-copy mmap).
 
-## This fork: inkserve
+## My changes
 
 This repository is erisinky's GPL-3.0-or-later `gpl-license` branch, plus upstream pull request #2 (Rowan's one-token
-prefill fix), plus the engine changes behind [inkserve](inkserve/README.md), an OpenAI-style server for agent harnesses:
-- the release's own NVFP4 / MXFP8 expert weights, and Q8_0 attention, for predictions closer to the release
-- sampling on the GPU, with a thinking budget
-- `inkling serve`, a long-lived engine with a prefix cache (`src/serve.rs`)
-- a small-batch verify pass, and DSpark speculative decoding with the release's drafter (opt-in)
+prefill fix), plus my changes:
+- **the release's own NVFP4 / MXFP8 expert weights**, and Q8_0 attention, for predictions much closer to the release
+  (top-1 agreement with a near-lossless reference ~95%, against 85–89% for Q4_K_M)
+- **tuned decode kernels and sampling on the GPU:** served decode at 89 / 79 / 63 tok/s at ~1K / 11K / 35K context on an
+  M5 Pro
+- **`inkling serve`** with a prefix cache, and [inkserve](inkserve/README.md), an OpenAI-style server for agent harnesses
+- **DSpark speculative decoding**, opt-in: exact, but only ~3% faster on agent text
 
-[inkserve/PATCH.md](inkserve/PATCH.md) lists the changes part by part. The Go server and the weight converter are in
-[inkserve/](inkserve/). The original README follows.
+[MYCHANGES.md](MYCHANGES.md) has the summary, the numbers and experiments, and the details, including how to build.
 
-Changes in this fork: Copyright (C) 2026 Rewt. They are free software under the same terms as erisinky: the GNU General
-Public License, version 3 or (at your option) any later version. See [LICENSE](LICENSE) and the License section below.
+My changes are Copyright (C) 2026 Rewt. They are free software under the same terms as erisinky: the GNU General Public
+License, version 3 or (at your option) any later version. See [LICENSE](LICENSE) and the License section below.
+
+The original README follows.
 
 ## Results (Apple M5 Pro, 48 GB, `Inkling-2-Mini-Q4_K_M.gguf`, greedy)
 

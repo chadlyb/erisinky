@@ -31,7 +31,7 @@ From `thinkingmachines/Inkling-2-Mini` at commit `b85c3cfa` (`hf_quant_config.js
 
 ## The file: NV4 and MX8
 
-`cmd/inkconvert` builds a GGUF from the Q4_K_M file and the official safetensors. It replaces every `ffn_gate_up_exps` and `ffn_down_exps` tensor and copies everything else. Two new block types hold the experts. They are private to this branch, and llama.cpp can't load them.
+`tools/inkconvert` builds a GGUF from the Q4_K_M file and the official safetensors. It replaces every `ffn_gate_up_exps` and `ffn_down_exps` tensor and copies everything else. Two new block types hold the experts. They are private to this branch, and llama.cpp can't load them.
 
 | Type | Id | Block (32 weights) | Bits per weight | Holds |
 |---|---|---|---|---|
