@@ -1,0 +1,26 @@
+# Glossary
+
+- **Engine:** erisinky's binary (`inkling`) running its `serve` command, with the model loaded. inkserve starts it as a child process.
+- **erisinky:** a third-party Rust + Metal inference engine for Inkling 2 Mini (github.com/Eriskii/erisinky). GPL-3.0-or-later (upstream commit `d1d5263`, on branch `gpl-license`).
+- **inky:** a GPL-3.0-or-later fork of erisinky by Glenn Fiedler and others (github.com/robotgamedevelopers/inky). It adds several streams in one engine ("lanes") and some engine fixes.
+- **GPU sampling / chained generation:** drawing each token on the GPU (Gumbel-max), so the next decode step can be committed before the CPU sees the token. See ARCHITECTURE.md → Sampling.
+- **Routed experts:** the 128 small MLPs per layer, 8 of which run for each token. They hold almost all of the model's weights. Each has a gate/up projection (`w13`, GGUF `ffn_gate_up_exps`) and a down projection (`w2`, `ffn_down_exps`).
+- **NVFP4 / MXFP8:** the formats the experts were released in. NVFP4 is 4-bit floats with an FP8 scale per 16 weights and an FP32 scale per expert. MXFP8 is 8-bit floats with a power-of-two scale per 32 weights. See [NATIVE.md](NATIVE.md).
+- **NV4 / MX8:** this project's GGUF block types (ids 200 and 201) that hold NVFP4 and MXFP8 bit for bit. Only the patched engine reads them.
+- **gscale:** the per-expert FP32 scale of an NVFP4 tensor, stored in a companion tensor named `….gscale`.
+- **Native-experts file:** `Inkling-2-Mini-native-experts.gguf`, built by `cmd/inkconvert`: the Q4_K_M file with its experts replaced by NV4 and MX8.
+- **Control token:** a token like `<|message_model|>` or `<|end_message|>` that structures the conversation. The protocol marks them `s`.
+- **Live context:** the tokens whose state the engine holds right now: the last prompt plus what it generated (on the GPU path, including the stop token).
+- **Snapshot:** a copy of the sliding-window rings and the convolution state at one position, so the engine can go back to it. Taken two tokens before the end of each prompt.
+- **Prefix cache:** reusing the live context or the snapshot when a new prompt starts with it.
+- **Thinking budget:** the most reasoning tokens a reply may use. At the limit the engine closes the thinking message itself.
+- **Effort:** the "Thinking effort level" line in the prompt, a number from 0 to 0.99 (`high` = 0.9). It steers how long the model thinks; the budget is the hard limit.
+- **Golden prompts:** `testdata/golden.json`, the model's official template rendered by `transformers` for the test cases. The Go renderer must match them byte for byte.
+- **DSpark:** speculative decoding with the release's small drafter model (`mtp.safetensors`, converted to `Inkling-2-Mini-dspark.gguf`). Off unless inkserve gets `-dspark`. See [DSPARK.md](DSPARK.md).
+- **Drafter:** DSpark's 3-layer model. It reads taps from the main model and proposes the next few tokens.
+- **Taps:** four hidden-state vectors per position (three layer visits plus the final-norm output) that the main model writes to a 1,024-position ring for the drafter.
+- **Cycle:** one DSpark round: the drafter proposes 1–3 tokens (the **depth**), one verify pass checks them, and the accepted ones are kept.
+- **Verify pass:** one batched pass of the main model over 2–8 tokens that returns the logits of every position. `Engine::encode_verify`.
+- **Anchor:** the last token streamed, not yet fed through the model. Each cycle verifies the anchor plus its drafts, and the target's next token becomes the new anchor.
+- **Acceptance:** how many drafts a cycle keeps. Standard speculative sampling accepts a draft with probability min(1, p/q), so the output distribution stays exactly plain decoding's.
+- **Stretch:** a run of plain decode steps inside DSpark generation, used while no draft depth beats a plain step.

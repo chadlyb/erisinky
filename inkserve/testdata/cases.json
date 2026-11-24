@@ -1,0 +1,54 @@
+[
+  {"name": "one user message", "effort": "high",
+   "messages": [{"role": "user", "content": "Hi."}]},
+  {"name": "system then user", "effort": "medium",
+   "messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Hi."}]},
+  {"name": "only a system message", "effort": "low",
+   "messages": [{"role": "system", "content": "Be terse."}]},
+  {"name": "effort zero", "effort": 0,
+   "messages": [{"role": "user", "content": "Hi."}]},
+  {"name": "effort number", "effort": 0.5,
+   "messages": [{"role": "user", "content": "Hi."}]},
+  {"name": "multi-turn with reasoning", "effort": "high",
+   "messages": [
+     {"role": "user", "content": "What is 2+2?"},
+     {"role": "assistant", "content": "4", "reasoning_content": "Simple sum."},
+     {"role": "user", "content": "And 3+3?"}]},
+  {"name": "assistant without reasoning", "effort": "high",
+   "messages": [
+     {"role": "user", "content": "What is 2+2?"},
+     {"role": "assistant", "content": "4"},
+     {"role": "user", "content": "And 3+3?"}]},
+  {"name": "tools, call by id, result", "effort": "high",
+   "tools": [
+     {"type": "function", "function": {"name": "run_shell", "description": "Run a shell command & return its output <stdout>.",
+       "parameters": {"type": "object", "properties": {"cmd": {"type": "string", "description": "the command"}, "timeout": {"type": "number", "default": 1.0}}, "required": ["cmd"]}}},
+     {"type": "function", "function": {"name": "noop"}}],
+   "messages": [
+     {"role": "system", "content": "You are an agent."},
+     {"role": "user", "content": "List files."},
+     {"role": "assistant", "content": null, "reasoning_content": "Use ls.",
+      "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "run_shell", "arguments": "{\"timeout\": 2.50, \"cmd\": \"ls -la\"}"}}]},
+     {"role": "tool", "tool_call_id": "call_1", "content": "a.go\nb.go"},
+     {"role": "user", "content": "Thanks."}]},
+  {"name": "two calls, empty content, tool by name", "effort": "high",
+   "tools": [{"type": "function", "function": {"name": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}}],
+   "messages": [
+     {"role": "user", "content": "Read two files."},
+     {"role": "assistant", "content": "",
+      "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"path\": \"a.go\"}"}},
+        {"id": "c2", "type": "function", "function": {"name": "read", "arguments": "{\"z\": {\"b\": [1, 2.0, {\"y\": null, \"x\": true}], \"a\": \"é ü 日本 \\u00e9 \\\"q\\\" <tag>\"}, \"Path\": \"b.go\", \"path\": \"b.go\"}"}}]},
+     {"role": "tool", "name": "read", "content": "package a"},
+     {"role": "tool", "tool_call_id": "c2", "content": "package b"}]},
+  {"name": "content parts and empty strings", "effort": "high",
+   "messages": [
+     {"role": "user", "content": [{"type": "text", "text": "Part one."}, {"type": "text", "text": "Part two."}]},
+     {"role": "assistant", "content": ""},
+     {"role": "user", "content": ""}]},
+  {"name": "assistant with a name", "effort": "high",
+   "messages": [
+     {"role": "user", "content": "Hi."},
+     {"role": "assistant", "name": "helper", "content": "Hello."},
+     {"role": "user", "content": "Bye."}]}
+]

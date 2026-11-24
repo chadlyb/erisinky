@@ -1,0 +1,46 @@
+[
+ {
+  "name": "one user message",
+  "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Hi.<|end_message|>"
+ },
+ {
+  "name": "system then user",
+  "prompt": "<|message_system|><|content_text|>Be terse.<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.7<|end_message|><|message_user|><|content_text|>Hi.<|end_message|>"
+ },
+ {
+  "name": "only a system message",
+  "prompt": "<|message_system|><|content_text|>Be terse.<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.2<|end_message|>"
+ },
+ {
+  "name": "effort zero",
+  "prompt": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Hi.<|end_message|>"
+ },
+ {
+  "name": "effort number",
+  "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.5<|end_message|><|message_user|><|content_text|>Hi.<|end_message|>"
+ },
+ {
+  "name": "multi-turn with reasoning",
+  "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>What is 2+2?<|end_message|><|message_model|><|content_thinking|>Simple sum.<|end_message|><|message_model|><|content_text|>4<|end_message|><|content_model_end_sampling|><|message_user|><|content_text|>And 3+3?<|end_message|>"
+ },
+ {
+  "name": "assistant without reasoning",
+  "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>What is 2+2?<|end_message|><|message_model|><|content_text|>4<|end_message|><|content_model_end_sampling|><|message_user|><|content_text|>And 3+3?<|end_message|>"
+ },
+ {
+  "name": "tools, call by id, result",
+  "prompt": "<|message_system|>tool_declare<|content_xml|>[{\"description\":\"Run a shell command & return its output <stdout>.\",\"name\":\"run_shell\",\"parameters\":{\"properties\":{\"cmd\":{\"description\":\"the command\",\"type\":\"string\"},\"timeout\":{\"default\":1.0,\"type\":\"number\"}},\"required\":[\"cmd\"],\"type\":\"object\"},\"type\":\"function\"},{\"description\":\"\",\"name\":\"noop\",\"parameters\":{},\"type\":\"function\"}]<|end_message|><|message_system|><|content_text|>You are an agent.<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>List files.<|end_message|><|message_model|><|content_thinking|>Use ls.<|end_message|><|message_model|>run_shell<|content_invoke_tool_json|>{\"name\":\"run_shell\",\"args\":{\"cmd\":\"ls -la\",\"timeout\":2.5}}<|end_message|><|content_model_end_sampling|><|message_tool|>run_shell<|content_text|>a.go\nb.go<|end_message|><|message_user|><|content_text|>Thanks.<|end_message|>"
+ },
+ {
+  "name": "two calls, empty content, tool by name",
+  "prompt": "<|message_system|>tool_declare<|content_xml|>[{\"description\":\"\",\"name\":\"read\",\"parameters\":{\"properties\":{\"path\":{\"type\":\"string\"}},\"type\":\"object\"},\"type\":\"function\"}]<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Read two files.<|end_message|><|message_model|>read<|content_invoke_tool_json|>{\"name\":\"read\",\"args\":{\"path\":\"a.go\"}}<|end_message|><|message_model|>read<|content_invoke_tool_json|>{\"name\":\"read\",\"args\":{\"Path\":\"b.go\",\"path\":\"b.go\",\"z\":{\"b\":[1,2.0,{\"y\":null,\"x\":true}],\"a\":\"é ü 日本 é \\\"q\\\" <tag>\"}}}<|end_message|><|content_model_end_sampling|><|message_tool|>read<|content_text|>package a<|end_message|><|message_tool|>read<|content_text|>package b<|end_message|>"
+ },
+ {
+  "name": "content parts and empty strings",
+  "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Part one.<|end_message|><|message_user|><|content_text|>Part two.<|end_message|><|message_model|><|content_text|><|end_message|><|content_model_end_sampling|><|message_user|><|content_text|><|end_message|>"
+ },
+ {
+  "name": "assistant with a name",
+  "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Hi.<|end_message|><|message_model|>helper<|content_text|>Hello.<|end_message|><|content_model_end_sampling|><|message_user|><|content_text|>Bye.<|end_message|>"
+ }
+]

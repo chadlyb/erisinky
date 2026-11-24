@@ -1,0 +1,44 @@
+  {
+    "engine": "dsserve",
+    "port": 8045,
+    "context": 131072,
+    "efforts": [
+      "none",
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+    ],
+    "thinking": "high by default, with an 8,192-token thinking budget (inkserve flags)",
+    "log": "~/erisinky-eval/serve-m5ctl.log",
+    "id": "inkling-erisinky",
+    "name": "Inkling 2 Mini (inkserve + erisinky, native experts)",
+    "gib": 22,
+    "command": [
+      "~/erisinky-eval/serve-m5ctl.sh"
+    ],
+    "match": "erisinky-eval/inkserve -listen 127\\.0\\.0\\.1:8045 .*-ctx 131072$"
+  },
+  {
+    "engine": "dsserve",
+    "port": 8045,
+    "context": 131072,
+    "efforts": [
+      "none",
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+    ],
+    "thinking": "high by default, with an 8,192-token thinking budget (inkserve flags)",
+    "log": "~/erisinky-eval/serve-m5ctl.log",
+    "id": "inkling-erisinky-dspark",
+    "name": "Inkling 2 Mini (inkserve + erisinky, DSpark: ~3% faster)",
+    "gib": 23,
+    "command": [
+      "~/erisinky-eval/serve-m5ctl.sh",
+      "dspark"
+    ],
+    "match": "erisinky-eval/inkserve -listen 127\\.0\\.0\\.1:8045 .*-dspark \\S+$"
+  }
+]
