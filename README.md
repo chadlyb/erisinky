@@ -3,6 +3,21 @@
 A from-scratch inference engine for **Thinking Machines' Inkling 2 Mini** (`inkling2_loop`, 26.4B total / 3.4B active MoE)
 on Apple Silicon: Rust host + hand-fused Metal kernels, reading the LM Studio GGUF directly (zero-copy mmap).
 
+## This fork: inkserve
+
+This repository is erisinky's GPL-3.0-or-later `gpl-license` branch, plus upstream pull request #2 (Rowan's one-token
+prefill fix), plus the engine changes behind [inkserve](inkserve/README.md), an OpenAI-style server for agent harnesses:
+- the release's own NVFP4 / MXFP8 expert weights, and Q8_0 attention, for predictions closer to the release
+- sampling on the GPU, with a thinking budget
+- `inkling serve`, a long-lived engine with a prefix cache (`src/serve.rs`)
+- a small-batch verify pass, and DSpark speculative decoding with the release's drafter (opt-in)
+
+[inkserve/PATCH.md](inkserve/PATCH.md) lists the changes part by part. The Go server and the weight converter are in
+[inkserve/](inkserve/). The original README follows.
+
+Changes in this fork: Copyright (C) 2026 Rewt. They are free software under the same terms as erisinky: the GNU General
+Public License, version 3 or (at your option) any later version. See [LICENSE](LICENSE) and the License section below.
+
 ## Results (Apple M5 Pro, 48 GB, `Inkling-2-Mini-Q4_K_M.gguf`, greedy)
 
 | | LM Studio runtime (llama.cpp 2.80.1) | llama.cpp master | **inkling** | speedup vs LM Studio |
