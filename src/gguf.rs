@@ -10,6 +10,9 @@ pub const T_Q8_0: u32 = 8;
 pub const T_Q4_K: u32 = 12;
 pub const T_Q6_K: u32 = 14;
 pub const T_BF16: u32 = 30;
+/// inkserve's private expert types (NATIVE.md): NVFP4 and MXFP8 blocks of 32 weights
+pub const T_NV4: u32 = 200;
+pub const T_MX8: u32 = 201;
 
 /// (bytes per block, elements per block)
 pub fn type_block(t: u32) -> (usize, usize) {
@@ -22,6 +25,8 @@ pub fn type_block(t: u32) -> (usize, usize) {
         12 => (144, 256),
         13 => (176, 256),
         14 => (210, 256),
+        200 => (18, 32),
+        201 => (34, 32),
         _ => panic!("unsupported ggml type {t}"),
     }
 }
@@ -29,7 +34,7 @@ pub fn type_block(t: u32) -> (usize, usize) {
 pub fn type_name(t: u32) -> &'static str {
     match t {
         0 => "F32", 1 => "F16", 30 => "BF16", 2 => "Q4_0", 6 => "Q5_0", 8 => "Q8_0",
-        12 => "Q4_K", 13 => "Q5_K", 14 => "Q6_K", _ => "?",
+        12 => "Q4_K", 13 => "Q5_K", 14 => "Q6_K", 200 => "NV4", 201 => "MX8", _ => "?",
     }
 }
 

@@ -6,6 +6,9 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer};
 use std::cell::{Cell, RefCell};
 use std::os::unix::fs::FileExt;
 
+mod dspark;
+pub use dspark::Drafter;
+
 pub const E: usize = 2304;
 pub const NH: usize = 24;
 pub const NKV: usize = 8;
@@ -82,8 +85,8 @@ const C_OMIX: u32 = 12; const C_LMHEAD: u32 = 13; const C_ARGMAX: u32 = 14;
 pub const KERNELS: &[&str] = &[
     "k_embed", "k_mix", "k_mv", "k_ctrl_down", "k_ctrl_apply", "k_attn", "k_attn_combine",
     "k_moe_gu", "k_moe_down", "k_argmax1", "k_argmax2",
-    "k_topk", "k_norm",
-    "k_gemm", "k_moe_gemm", "k_gemm_t", "k_moe_gemm_t", "k_topk_b", "k_moe_route", "k_moe_comb_b", "k_postconv_b", "k_state_upd", "k_kvprep_b", "k_attn_b", "k_attn_bt", "k_ctrl_apply_b", "k_tohalf", "k_gemm_sg8", "k_gemm_sg4", "k_moe_sg8", "k_moe_sg4", "k_ctrl_gf", "k_moe_route3", "k_moe_comb_h", "k_attn_h", "k_kvcopy", "k_mix_b_1_1", "k_mix_b_2_1", "k_mix_b_3_1", "k_mix_b_4_1", "k_mix_b_5_1", "k_mix_b_6_1", "k_mix_b_1_3", "k_mix_b_2_3", "k_mix_b_3_3", "k_mix_b_4_3", "k_mix_b_5_3", "k_mix_b_6_3", "k_mix_b_1_4", "k_mix_b_2_4", "k_mix_b_3_4", "k_mix_b_4_4", "k_mix_b_5_4", "k_mix_b_6_4", "k_mix_b_id",
+    "k_topk", "k_norm", "k_gumbel", "k_sampstate",
+    "k_gemm", "k_moe_gemm", "k_gemm_t", "k_moe_gemm_t", "k_topk_b", "k_moe_route", "k_moe_comb_b", "k_postconv_b", "k_state_upd", "k_kvprep_b", "k_attn_b", "k_attn_bt", "k_ctrl_apply_b", "k_tohalf", "k_gemm_sg8", "k_gemm_sg4", "k_moe_sg8", "k_moe_sg4", "k_ctrl_gf", "k_moe_route3", "k_moe_comb_h", "k_attn_h", "k_kvcopy", "k_tapcopy", "k_slse", "k_sresid", "k_sdecide", "k_dcopyf", "k_dctx_mix", "k_dctx_fin", "k_dfill", "k_drms", "k_dqk", "k_dattn", "k_dadd", "k_dsilu", "k_dmin", "k_dmv_bf16", "k_dmgate", "k_dmfin", "k_dzero", "k_attn_hs", "k_attn_hs_comb", "k_moe_routeT", "k_moe_guT2", "k_moe_guT3", "k_moe_guT4", "k_moe_guT5", "k_moe_guT6", "k_moe_guT7", "k_moe_guT8", "k_moe_downT2", "k_moe_downT3", "k_moe_downT4", "k_moe_downT5", "k_moe_downT6", "k_moe_downT7", "k_moe_downT8", "k_mvT2", "k_mvT3", "k_mvT4", "k_mvT5", "k_mvT6", "k_mvT7", "k_mvT8", "k_mix_b_1_1", "k_mix_b_2_1", "k_mix_b_3_1", "k_mix_b_4_1", "k_mix_b_5_1", "k_mix_b_6_1", "k_mix_b_1_3", "k_mix_b_2_3", "k_mix_b_3_3", "k_mix_b_4_3", "k_mix_b_5_3", "k_mix_b_6_3", "k_mix_b_1_4", "k_mix_b_2_4", "k_mix_b_3_4", "k_mix_b_4_4", "k_mix_b_5_4", "k_mix_b_6_4", "k_mix_b_id", "k_mix_bw_1_1", "k_mix_bw_2_1", "k_mix_bw_3_1", "k_mix_bw_4_1", "k_mix_bw_5_1", "k_mix_bw_6_1", "k_mix_bw_1_3", "k_mix_bw_2_3", "k_mix_bw_3_3", "k_mix_bw_4_3", "k_mix_bw_5_3", "k_mix_bw_6_3", "k_mix_bw_1_4", "k_mix_bw_2_4", "k_mix_bw_3_4", "k_mix_bw_4_4", "k_mix_bw_5_4", "k_mix_bw_6_4", "k_mix_bw_id",
     "k_touch",
 ];
 
@@ -135,7 +138,8 @@ struct MoeArgs {
     act_off: u32, wscale: f32, beta: f32, lbeta: f32,
     dn_lo: u32, dn_hi: u32, dn_expert_bytes: u32, dn_row_bytes: u32,
     dn_type: u32, out_off: u32, res_off: i32, cs_off: u32,
-    convw_off: u32, pad: [u32; 3],
+    convw_off: u32, gu_type: u32, gu_gs_lo: u32, gu_gs_hi: u32,
+    dn_gs_lo: u32, dn_gs_hi: u32, pad: [u32; 2],
 }
 
 // ---- prefill arg structs (mirror prefill.metal)
@@ -151,6 +155,7 @@ struct GemmHArgs { nseg: u32, t: u32, pad: [u32; 2], seg: [HSeg; 10] }
 struct MoeGemmHArgs {
     w_lo: u32, w_hi: u32, expert_bytes: u32, row_bytes: u32, wtype: u32, nrows: u32, k: u32, xh_off: u32,
     tiles_off: u32, ntiles_off: u32, out_off: u32, ldo: u32, situ: u32, aw_off: u32, beta: f32, lbeta: f32,
+    gs_lo: u32, gs_hi: u32, pad: [u32; 2],
 }
 #[repr(C)] #[derive(Clone, Copy, Default)]
 struct CtrlBJob { u_off: u32, m_off: u32, g_off: u32, f_off: u32, out_off: u32, norm_w: u32, h_off: i32, nof32: u32 }
@@ -165,8 +170,8 @@ struct GemmArgs { nseg: u32, t: u32, pad: [u32; 2], seg: [GSeg; 10] }
 #[repr(C)] #[derive(Clone, Copy, Default)]
 struct MoeGemmArgs {
     w_lo: u32, w_hi: u32, expert_bytes: u32, row_bytes: u32, wtype: u32, nrows: u32, k: u32, x_off: u32,
-    gather: u32, perm_off: u32, tiles_off: u32, ntiles_off: u32, out_off: u32, ldo: u32, situ: u32, pad: u32,
-    beta: f32, lbeta: f32, pad2: [f32; 2],
+    gather: u32, perm_off: u32, tiles_off: u32, ntiles_off: u32, out_off: u32, ldo: u32, situ: u32, gs_lo: u32,
+    beta: f32, lbeta: f32, gs_hi: u32, pad2: u32,
 }
 #[repr(C)] #[derive(Clone, Copy, Default)]
 struct TopkBArgs { logits_off: u32, bias_off: u32, sel_off: u32, t: u32, wscale: f32, pad: [u32; 3] }
@@ -176,10 +181,26 @@ struct RouteArgs { sel_off: u32, t: u32, perm_off: u32, inv_off: u32, tiles_off:
 struct Route3Args { sel_off: u32, t: u32, perm_off: u32, inv_off: u32, aw_off: u32, ind_off: u32, gu_y: u32, dn_y: u32, tiles_off: [u32; NTC], pad: [u32; 2] }
 #[repr(C)] #[derive(Clone, Copy, Default)]
 struct MoeCombArgs { yd_off: u32, inv_off: u32, sel_off: u32, out_off: u32 }
+/// DSpark tap copy (prefill.metal: k_tapcopy)
+#[repr(C)] #[derive(Clone, Copy, Default)]
+struct TapArgs { src_off: u32, src_half: u32, n: u32, pos0: u32, from: u32, feat: u32, ring_off: u32, pad: u32 }
+/// small-T split-K attention (prefill.metal: k_attn_hs / k_attn_hs_comb)
+#[repr(C)] #[derive(Clone, Copy, Default)]
+struct AttnHsArgs { b: AttnBArgs, kps: u32, nsplit: u32, part_off: u32, pad: u32 }
+/// k_moe_downT's split of the expert blocks across simdgroups (prefill.metal DNT_KS)
+const DNT_KS: usize = 4;
+/// Batch arena rows a verify pass needs: the small-T MoE keeps its expert list in the arena's permutation buffer
+/// (TOPK per row; the list takes 641 words), and without the room it would fall back to the prefill MoE (~6 ms slower).
+pub const VERIFY_BATCH: usize = 128;
+/// small-T MoE (prefill.metal: k_moe_routeT / k_moe_guT / k_moe_downT)
+#[repr(C)] #[derive(Clone, Copy, Default)]
+struct MoeTArgs { sel_off: u32, n: u32, list_off: u32, xh_off: u32, acth_off: u32, out_off: u32,
+                  gu_lo: u32, gu_hi: u32, gu_eb: u32, gu_rb: u32, gu_type: u32, gu_gs_lo: u32, gu_gs_hi: u32,
+                  dn_lo: u32, dn_hi: u32, dn_eb: u32, dn_rb: u32, dn_type: u32, dn_gs_lo: u32, dn_gs_hi: u32, beta: f32, lbeta: f32, pad: [u32; 2] }
 #[repr(C)] #[derive(Clone, Copy, Default)]
 struct ConvBArgs { y_off: u32, ldy: u32, res_off: u32, out_off: u32, cs_off: u32, convw_off: u32, has_res: u32, pad: u32 }
 #[repr(C)] #[derive(Clone, Copy, Default)]
-struct StateArgs { x_off: u32, ldx: u32, cs_off: u32, nch: u32, t: u32, pad: [u32; 3] }
+struct StateArgs { x_off: u32, ldx: u32, cs_off: u32, nch: u32, t: u32, hist_off: u32, pad: [u32; 2] }
 #[repr(C)] #[derive(Clone, Copy, Default)]
 struct KvPrepArgs {
     t: u32, p0: u32, ring: u32, cap: u32, k_base: u32, v_base: u32, cs_off: u32, q_off: u32,
@@ -243,15 +264,21 @@ impl BArena {
 }
 #[repr(C)] #[derive(Clone, Copy, Default)]
 struct ArgmaxArgs { logits_off: u32, n: u32, part_off: u32, nparts: u32, out_index: u32, pad: [u32; 3] }
+/// Sampling on the GPU for a decode step's argmax (kernels.metal: k_gumbel, k_sampstate). Set through `Engine::samp`.
+#[repr(C)] #[derive(Clone, Copy, Default, Debug)]
+pub struct SampArgs { pub logits_off: u32, pub n: u32, pub seed_lo: u32, pub seed_hi: u32, pub pos: u32, pub think: u32, pub end: u32,
+                      pub budget: u32, pub state: u32, pub temp: f32, pub softcap: f32, pub pad: u32 }
 
 // ----------------------------------------------------------------------------- weights
 #[derive(Clone, Copy, Default, Debug)]
-pub struct QW { pub off: u64, pub row_bytes: u32, pub ty: u32, pub rows: u32, pub k: u32, pub expert_bytes: u64 }
+pub struct QW { pub off: u64, pub row_bytes: u32, pub ty: u32, pub rows: u32, pub k: u32, pub expert_bytes: u64, pub gs: u64 }
 
 fn qw(g: &Gguf, name: &str) -> QW {
     let t = g.tensor(name);
     let rb = t.row_bytes();
-    QW { off: t.file_off, row_bytes: rb as u32, ty: t.ty, rows: t.ne[1] as u32, k: t.ne[0] as u32, expert_bytes: rb * t.ne[1] }
+    // NV4 experts carry one fp32 scale per expert in a companion tensor (NATIVE.md)
+    let gs = if t.ty == T_NV4 { g.tensor(&name.replace(".weight", ".gscale")).file_off } else { 0 };
+    QW { off: t.file_off, row_bytes: rb as u32, ty: t.ty, rows: t.ne[1] as u32, k: t.ne[0] as u32, expert_bytes: rb * t.ne[1], gs }
 }
 
 pub struct Layer {
@@ -301,6 +328,14 @@ pub struct Arena {
     pub q: u32, pub gate: u32, pub k: u32, pub v: u32, pub rel: u32, pub sink: u32, pub kdyn: u32, pub vdyn: u32,
     pub attn_g: u32, pub inp: [u32; 3], pub msg: [u32; 4], pub cin: [u32; 3], pub ctrlg: [u32; 4], pub ssp: [u32; 4],
     pub cat: [u32; 4], pub fin: u32, pub finc: u32, pub fout: u32, pub rlog: u32, pub sel: u32, pub sel_log: u32, pub act: u32, pub part: u32, pub logits: u32, pub amax: u32, pub total: u32,
+    /// a verify pass's logits, one row of the output head per position (up to 8)
+    pub vlog: u32,
+    /// DSpark taps: [1024 positions (ring, position % 1024)][4 features][E], f32
+    pub taps: u32,
+    /// the DSpark drafter's scratch and context rings (dspark::DScratch)
+    pub dsp: u32,
+    /// a verify pass's conv history: [N_SLOT][3 + 8 rows][NCH], f32 (k_state_upd; verify_rollback)
+    pub vhist: u32,
 }
 const N_VEC: usize = 16;
 /// hidden-state vectors of the batch arena: at most 4 block states + the current one + 3 pinned + the one being written
@@ -324,7 +359,11 @@ impl Arena {
         let part = take(NH * max_split * (HD + 2));
         let logits = take(vocab_pad);
         let amax = take(2 * 256);
-        Arena { q, gate, k, v, rel, sink, kdyn, vdyn, attn_g, inp, msg, cin, ctrlg, ssp, cat, fin, finc, fout, rlog, sel, sel_log, act, part, logits, amax, total: o }
+        let vlog = take(8 * vocab_pad);
+        let taps = take(1024 * 4 * E);
+        let dsp = take(dspark::DScratch::new(0, vocab_pad).total as usize);
+        let vhist = take(N_SLOT * 11 * NCH);
+        Arena { q, gate, k, v, rel, sink, kdyn, vdyn, attn_g, inp, msg, cin, ctrlg, ssp, cat, fin, finc, fout, rlog, sel, sel_log, act, part, logits, amax, vlog, taps, dsp, vhist, total: o }
     }
     pub fn vec(i: usize) -> u32 { (i * E) as u32 }
 }
@@ -346,6 +385,13 @@ pub struct Engine {
     pub g: Gguf,
     pub gpu: Gpu,
     w: Buf, pub pb: Buf, cs: Buf, pub toks: Buf, ctr: Buf,
+    /// when set, a step's argmax becomes a draw (SampArgs); serve.rs sets it for one generation
+    pub samp: std::cell::Cell<Option<SampArgs>>,
+    /// set while a verify pass is encoded (encode_verify): small-T kernels, logits for every position
+    pub verify: std::cell::Cell<bool>,
+    /// DSpark: capture the drafter's target features of every position >= tap_from into the tap ring
+    pub taps_on: std::cell::Cell<bool>,
+    pub tap_from: std::cell::Cell<usize>,
     /// activations: the small decode arena, followed by the batch (prefill) arena while a prefill needs one
     act: std::cell::RefCell<Buf>,
     /// K/V cache (fp16). Sliding-window layers keep exactly their window (a ring of EXT keys per slot), full-attention
@@ -431,10 +477,11 @@ impl Engine {
                 dn: qw(&g, &n("ffn_down_exps.weight")),
             };
             assert!(layer.swa == (layer.attn_norm >= 0));
-            assert_eq!(layer.gu.ty, T_Q4_K);
-            assert!(layer.dn.ty == T_Q8_0 || layer.dn.ty == T_Q5_0, "down type {}", type_name(layer.dn.ty));
-            for w in [&layer.wq, &layer.wgate, &layer.wk, &layer.wo, &layer.wrel, &layer.wsink] { assert_eq!(w.ty, T_Q4_K); }
-            assert!(layer.wv.ty == T_Q4_K || layer.wv.ty == T_Q6_K);
+            assert!(matches!(layer.gu.ty, T_Q4_K | T_Q8_0 | T_NV4 | T_MX8), "gate_up type {}", type_name(layer.gu.ty));
+            assert!(matches!(layer.dn.ty, T_Q8_0 | T_Q5_0 | T_NV4 | T_MX8), "down type {}", type_name(layer.dn.ty));
+            for w in [&layer.wq, &layer.wgate, &layer.wk, &layer.wv, &layer.wo, &layer.wrel, &layer.wsink] {
+                assert!(matches!(w.ty, T_Q4_K | T_Q6_K | T_Q8_0), "attention type {}", type_name(w.ty));
+            }
             layers.push(layer);
         }
         let mut loops = Vec::new();
@@ -454,8 +501,8 @@ impl Engine {
         let output_res_query = pb.f32(&g, "output_res_query.weight");
         let tok_embd = qw(&g, "token_embd.weight");
         let output = qw(&g, "output.weight");
-        assert_eq!(tok_embd.ty, T_Q4_K);
-        assert_eq!(output.ty, T_Q6_K);
+        assert!(matches!(tok_embd.ty, T_Q4_K | T_Q8_0), "token_embd type {}", type_name(tok_embd.ty));
+        assert!(matches!(output.ty, T_Q6_K | T_Q8_0), "output type {}", type_name(output.ty));
         let n_vocab = g.u(&a("vocab_size_unpadded")) as usize;
         let n_vocab_pad = output.rows as usize;
 
@@ -518,7 +565,7 @@ impl Engine {
             sep_comb: std::env::var("INK_FUSE_COMB").is_err(), sep_topk: std::env::var("INK_SEP_TOPK").is_ok(),
             tail: std::cell::Cell::new(std::env::var("INK_NO_TAIL").is_err()),
             skip: Default::default(), stop: std::cell::Cell::new(usize::MAX), done: std::cell::Cell::new(0),
-            last_out: Default::default(), last_mid: Default::default(),
+            last_out: Default::default(), last_mid: Default::default(), samp: Default::default(), verify: Default::default(), taps_on: Default::default(), tap_from: Default::default(),
             max_ctx, n_vocab,
         };
         let mut eng = eng;
@@ -1272,7 +1319,8 @@ impl Engine {
                     let dn = &self.layers[l].dn;
                     let ma = MoeArgs { sel_off: ar.logits + 100000 + ((l * 4 + it) as u32 % 32) * 16, act_off: ar.act, out_off: Arena::vec(2), res_off: Arena::vec(3) as i32,
                                        dn_lo: dn.off as u32, dn_hi: (dn.off >> 32) as u32, dn_expert_bytes: dn.expert_bytes as u32,
-                                       dn_row_bytes: dn.row_bytes, dn_type: dn.ty, ..Default::default() };
+                                       dn_row_bytes: dn.row_bytes, dn_type: dn.ty,
+                                       dn_gs_lo: dn.gs as u32, dn_gs_hi: (dn.gs >> 32) as u32, ..Default::default() };
                     sels.push(ma.sel_off);
                     e.pso(&self.gpu.pso(name));
                     e.bytes(&ma, 5);
@@ -1355,7 +1403,9 @@ impl Engine {
                     let ma = MoeArgs { sel_off: sel, x_off: Arena::vec(1), act_off: ar.act, out_off: Arena::vec(2), res_off: Arena::vec(3) as i32,
                         gu_lo: ld.gu.off as u32, gu_hi: (ld.gu.off >> 32) as u32, gu_expert_bytes: ld.gu.expert_bytes as u32, gu_row_bytes: ld.gu.row_bytes,
                         dn_lo: ld.dn.off as u32, dn_hi: (ld.dn.off >> 32) as u32, dn_expert_bytes: ld.dn.expert_bytes as u32, dn_row_bytes: ld.dn.row_bytes,
-                        dn_type: ld.dn.ty, beta: 4.0, lbeta: 25.0, cs_off: 0, convw_off: ld.ffn_post_conv, ..Default::default() };
+                        dn_type: ld.dn.ty, beta: 4.0, lbeta: 25.0, cs_off: 0, convw_off: ld.ffn_post_conv,
+                        gu_type: ld.gu.ty, gu_gs_lo: ld.gu.gs as u32, gu_gs_hi: (ld.gu.gs >> 32) as u32,
+                        dn_gs_lo: ld.dn.gs as u32, dn_gs_hi: (ld.dn.gs >> 32) as u32, ..Default::default() };
                     e.pso(&self.gpu.pso(which));
                     e.bytes(&ma, 5);
                     e.dispatch((grid.0, grid.1, 1), tgs);
@@ -1431,10 +1481,12 @@ impl Engine {
                             w_lo: l.gu.off as u32, w_hi: (l.gu.off >> 32) as u32, expert_bytes: l.gu.expert_bytes as u32, row_bytes: l.gu.row_bytes,
                             wtype: l.gu.ty, nrows: (2 * FF) as u32, k: E as u32, xh_off: b.xgh, tiles_off: b.tl[c], ntiles_off: b.ind + (c * 4) as u32,
                             out_off: b.acth, ldo: FF as u32, situ: 1, aw_off: b.aw, beta: self.situ_beta, lbeta: self.situ_lbeta,
+                            gs_lo: l.gu.gs as u32, gs_hi: (l.gu.gs >> 32) as u32, pad: [0; 2],
                         } } else { MoeGemmHArgs {
                             w_lo: l.dn.off as u32, w_hi: (l.dn.off >> 32) as u32, expert_bytes: l.dn.expert_bytes as u32, row_bytes: l.dn.row_bytes,
                             wtype: l.dn.ty, nrows: E as u32, k: FF as u32, xh_off: b.acth, tiles_off: b.tl[c], ntiles_off: b.ind + (c * 4) as u32,
                             out_off: b.yd, ldo: E as u32, situ: 0, aw_off: 0, beta: 0.0, lbeta: 0.0,
+                            gs_lo: l.dn.gs as u32, gs_hi: (l.dn.gs >> 32) as u32, pad: [0; 2],
                         } };
                         e.pso(&self.gpu.pso(name)); e.bytes(&g, 5);
                         e.dispatch_indirect(&self.act.borrow(), (b.ind as usize + which * 4 * NTC + c * 4) * 4, *tg);
@@ -1540,13 +1592,164 @@ impl Engine {
         best
     }
 
+    /// The routed-expert FFN of a batched pass: from the top-k selection (b.sel) and the FFN input to the expert sum
+    /// in b.ffn_y. Small T with NV4/MX8 experts takes the union kernels; otherwise the tiled path. `x`: the f32 FFN
+    /// input (the non-fp16 fallback only).
+    fn moe_ffn(&self, e: &Enc, l: &Layer, b: BArena, t: usize, ts: usize, x: u32) {
+        let n = t - ts;
+        let nn_ = n as u32;
+        let tt = t as u32;
+        let es = E as u32;
+        let sh = |off: u32, dim: usize| off + (ts * dim) as u32;
+        // small T (a speculative verify, DSPARK.md): each union expert read once, in the decode kernels' layout
+        let moet = self.verify.get() && self.hgemm && (2..=8).contains(&n) && matches!(l.gu.ty, T_NV4 | T_MX8) && matches!(l.dn.ty, T_NV4 | T_MX8)
+            && b.cap * TOPK >= 1 + 64 + 64 * 8 + 64 && std::env::var("INK_NO_MOET").is_err();
+        if moet {
+            let mt = MoeTArgs { sel_off: b.sel, n: nn_, list_off: b.perm, xh_off: sh(b.fh, E / 2), acth_off: b.acth, out_off: sh(b.ffn_y, E),
+                gu_lo: l.gu.off as u32, gu_hi: (l.gu.off >> 32) as u32, gu_eb: l.gu.expert_bytes as u32, gu_rb: l.gu.row_bytes, gu_type: l.gu.ty,
+                gu_gs_lo: l.gu.gs as u32, gu_gs_hi: (l.gu.gs >> 32) as u32,
+                dn_lo: l.dn.off as u32, dn_hi: (l.dn.off >> 32) as u32, dn_eb: l.dn.expert_bytes as u32, dn_rb: l.dn.row_bytes, dn_type: l.dn.ty,
+                dn_gs_lo: l.dn.gs as u32, dn_gs_hi: (l.dn.gs >> 32) as u32, beta: self.situ_beta, lbeta: self.situ_lbeta, pad: [0; 2] };
+            self.go(e, C_TOPK, "k_moe_routeT", &mt, (1, 1, 1), 64);
+            self.go(e, C_GU, &format!("k_moe_guT{n}"), &mt, (FF / 4, n * TOPK, 1), 128);
+            self.go(e, C_DOWN, &format!("k_moe_downT{n}"), &mt, (E / 8, 1, 1), 64 * DNT_KS);
+        } else {
+            let tile = 32usize;
+            if self.hgemm {
+                let ra = Route3Args { sel_off: b.sel, t: nn_, perm_off: b.perm, inv_off: b.inv, aw_off: b.aw, ind_off: b.ind, gu_y: (FF / 32) as u32,
+                                      dn_y: (E / 64) as u32, tiles_off: b.tl, pad: [0; 2] };
+                self.go(e, C_TOPK, "k_moe_route3", &ra, (1, 1, 1), 1024);
+            } else {
+                let ra = RouteArgs { sel_off: b.sel, t: tt, perm_off: b.perm, inv_off: b.inv, tiles_off: b.tiles, ntiles_off: b.ntiles, tile: tile as u32, pad: 0 };
+                self.go(e, C_ROUTER, "k_moe_route", &ra, (1, 1, 1), 1024);
+            }
+            let max_tiles = (t * TOPK).div_ceil(tile) + NEXP;
+            let gu = MoeGemmArgs {
+                w_lo: l.gu.off as u32, w_hi: (l.gu.off >> 32) as u32, expert_bytes: l.gu.expert_bytes as u32, row_bytes: l.gu.row_bytes,
+                wtype: l.gu.ty, nrows: (2 * FF) as u32, k: es, x_off: x, gather: 1, perm_off: b.perm, tiles_off: b.tiles, ntiles_off: b.ntiles,
+                out_off: b.act, ldo: FF as u32, situ: 1, gs_lo: l.gu.gs as u32, beta: self.situ_beta, lbeta: self.situ_lbeta,
+                gs_hi: (l.gu.gs >> 32) as u32, pad2: 0,
+            };
+            let mg = if self.tensor { "k_moe_gemm_t" } else { "k_moe_gemm" };
+            if self.hgemm {
+                // gather the FFN input rows of every (token, expert) assignment into contiguous half rows
+                // gather the FFN input rows of every (token, expert) assignment into contiguous half rows
+                self.tohalf_x(e, C_GATHER, sh(b.fh, E / 2), E, b.xgh, E, E, n * TOPK, Some(b.perm), true);
+                e.barrier();
+                // tiles in four widths, sized on the GPU by the routing kernel (indirect dispatch); classes run concurrently
+                if self.skip.get() & (1 << C_GU) == 0 {
+                    for (c, (name, _, tg)) in MOE_CLS.iter().enumerate() {
+                        let g = MoeGemmHArgs {
+                            w_lo: l.gu.off as u32, w_hi: (l.gu.off >> 32) as u32, expert_bytes: l.gu.expert_bytes as u32, row_bytes: l.gu.row_bytes,
+                            wtype: l.gu.ty, nrows: (2 * FF) as u32, k: es, xh_off: b.xgh, tiles_off: b.tl[c], ntiles_off: b.ind + (c * 4) as u32,
+                            out_off: b.acth, ldo: FF as u32, situ: 1, aw_off: b.aw, beta: self.situ_beta, lbeta: self.situ_lbeta,
+                            gs_lo: l.gu.gs as u32, gs_hi: (l.gu.gs >> 32) as u32, pad: [0; 2],
+                        };
+                        e.pso(&self.gpu.pso(name)); e.bytes(&g, 5);
+                        e.dispatch_indirect(&self.act.borrow(), (b.ind as usize + c * 4) * 4, *tg);
+                    }
+                    e.barrier();
+                }
+                if self.skip.get() & (1 << C_DOWN) == 0 {
+                    for (c, (name, _, tg)) in MOE_CLS.iter().enumerate() {
+                        let d = MoeGemmHArgs {
+                            w_lo: l.dn.off as u32, w_hi: (l.dn.off >> 32) as u32, expert_bytes: l.dn.expert_bytes as u32, row_bytes: l.dn.row_bytes,
+                            wtype: l.dn.ty, nrows: es, k: FF as u32, xh_off: b.acth, tiles_off: b.tl[c], ntiles_off: b.ind + (c * 4) as u32,
+                            out_off: b.yd, ldo: es, situ: 0, aw_off: 0, beta: 0.0, lbeta: 0.0,
+                            gs_lo: l.dn.gs as u32, gs_hi: (l.dn.gs >> 32) as u32, pad: [0; 2],
+                        };
+                        e.pso(&self.gpu.pso(name)); e.bytes(&d, 5);
+                        e.dispatch_indirect(&self.act.borrow(), (b.ind as usize + 4 * NTC + c * 4) * 4, *tg);
+                    }
+                    e.barrier();
+                }
+            } else {
+            self.go(e, C_GU, mg, &gu, (FF / 32, max_tiles, 1), 128);
+            let dn = MoeGemmArgs {
+                w_lo: l.dn.off as u32, w_hi: (l.dn.off >> 32) as u32, expert_bytes: l.dn.expert_bytes as u32, row_bytes: l.dn.row_bytes,
+                wtype: l.dn.ty, nrows: es, k: FF as u32, x_off: b.act, gather: 0, perm_off: b.perm, tiles_off: b.tiles, ntiles_off: b.ntiles,
+                out_off: b.yd, ldo: es, situ: 0, gs_lo: l.dn.gs as u32, beta: 0.0, lbeta: 0.0, gs_hi: (l.dn.gs >> 32) as u32, pad2: 0,
+            };
+            self.go(e, C_DOWN, mg, &dn, (E / 64, max_tiles, 1), 128);
+            }
+            let ca = MoeCombArgs { yd_off: b.yd, inv_off: b.inv, sel_off: b.sel, out_off: sh(b.ffn_y, E) };
+            if self.hgemm { self.go(e, C_COMB2, "k_moe_comb_h", &ca, (n, E.div_ceil(1024), 1), 256); }
+            else { self.go(e, C_DOWN, "k_moe_comb_b", &ca, (E / 256, t, 1), 256); }
+        }
+    }
+
+    /// dev (DSPARK.md): each small-T kernel against the original on identical random inputs, one layer at a time,
+    /// so the model's own amplification of rounding differences is out of the picture. Prints relative errors.
+    pub fn kcheck(&self, t: usize) {
+        self.ensure_batch(self.chunk);
+        let b = self.ba.get();
+        let mut rng = 0x1234_5678_9abc_def0u64;
+        let mut rnd = || { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; (rng >> 11) as f64 / (1u64 << 53) as f64 };
+        let a = self.act.borrow().contents().as_ptr() as *mut f32;
+        // f32 -> f16 bits, round to nearest even (normal range; tiny values flush to zero: fine for test data)
+        let h16 = |v: f32| -> u16 { let x = v.to_bits(); let sign = ((x >> 16) & 0x8000) as u16; let ex = ((x >> 23) & 0xff) as i32 - 112;
+            if ex <= 0 { return sign; } let man = x & 0x7f_ffff; let mut h = ((ex as u32) << 10) | (man >> 13); let rem = man & 0x1fff;
+            if rem > 0x1000 || (rem == 0x1000 && h & 1 == 1) { h += 1; } sign | h as u16 };
+        let put_half = |off: u32, i: usize, v: f32| unsafe { *((a.add(off as usize)) as *mut u16).add(i) = h16(v); };
+        let get = |off: u32, n: usize| -> Vec<f32> { unsafe { std::slice::from_raw_parts(a.add(off as usize), n).to_vec() } };
+        let cmp = |x: &[f32], y: &[f32]| -> (f64, f64) {
+            let num: f64 = x.iter().zip(y).map(|(p, q)| ((p - q) as f64).powi(2)).sum();
+            let den: f64 = x.iter().map(|p| (*p as f64).powi(2)).sum();
+            let mx = x.iter().zip(y).map(|(p, q)| (p - q).abs()).fold(0f32, f32::max) as f64;
+            let xm = x.iter().map(|p| p.abs()).fold(0f32, f32::max) as f64;
+            ((num / den.max(1e-30)).sqrt(), mx / xm.max(1e-30))
+        };
+        let run = |f: &dyn Fn(&Enc)| { let cb = self.gpu.cmd(); let e = Enc::new(&cb); self.bind(&e); f(&e); e.end(); cb.commit(); cb.waitUntilCompleted(); };
+        // MoE: random normalized FFN input; each token picks 8 distinct experts from a pool of 24, so tokens share experts
+        for ip in [0usize, 10, 22] {
+            let l = &self.layers[ip];
+            for i in 0..t * E { put_half(b.fh, i, (rnd() * 2.0 - 1.0) as f32 * 1.7); }
+            for tok in 0..t {
+                let mut picked: Vec<u32> = Vec::new();
+                while picked.len() < TOPK { let e = (rnd() * 24.0) as u32 * 5 % NEXP as u32; if !picked.contains(&e) { picked.push(e); } }
+                let ws: Vec<f64> = (0..TOPK).map(|_| rnd() + 0.05).collect();
+                let wsum: f64 = ws.iter().sum();
+                for k in 0..TOPK { unsafe { *a.add(b.sel as usize + tok * 16 + k) = picked[k] as f32; *a.add(b.sel as usize + tok * 16 + TOPK + k) = (ws[k] / wsum) as f32 * self.wscale; } }
+            }
+            self.verify.set(false);
+            run(&|e| self.moe_ffn(e, l, b, t, 0, 0));
+            let r0 = get(b.ffn_y, t * E);
+            self.verify.set(true);
+            run(&|e| self.moe_ffn(e, l, b, t, 0, 0));
+            self.verify.set(false);
+            let r1 = get(b.ffn_y, t * E);
+            let (rel, mx) = cmp(&r0, &r1);
+            println!("MoE layer {ip:>2} ({}/{}), T={t}: relative L2 error {rel:.2e}, max abs error / max {mx:.2e}",
+                     if l.gu.ty == T_NV4 { "NV4" } else { "MX8" }, if l.dn.ty == T_NV4 { "NV4" } else { "MX8" });
+        }
+        // matvec: the attention output projection (Q8_0, K = 3072) and the router (BF16, K = 2304)
+        let l = &self.layers[0];
+        let mut head = Self::hseg(&self.output, b.fh, self.ar.vlog);
+        head.ldo = self.output.rows;
+        for (name, seg, k) in [("wo (Q8_0)", Self::hseg(&l.wo, b.agh, b.wo_y), NH * HD), ("router (BF16)", Self::hseg_pb(l.router, NEXP as u32, E as u32, b.fh, b.wo_y), E),
+                               ("output head (Q6_K)", head, E)] {
+            let xh = seg.xh_off;
+            for i in 0..t * k { put_half(xh, i, (rnd() * 2.0 - 1.0) as f32); }
+            let rows = seg.ldo as usize;
+            self.verify.set(false);
+            run(&|e| self.gemm_h(e, C_WO, &[seg], t));
+            let r0 = get(seg.out_off, t * rows);
+            self.verify.set(true);
+            run(&|e| self.gemm_h(e, C_WO, &[seg], t));
+            self.verify.set(false);
+            let r1 = get(seg.out_off, t * rows);
+            let (rel, mx) = cmp(&r0, &r1);
+            println!("matvec {name}, T={t}: relative L2 error {rel:.2e}, max abs error / max {mx:.2e}");
+        }
+    }
+
     fn bind(&self, e: &Enc) {
         e.buf(&self.w, 0, 0); e.buf(&self.pb, 0, 1); e.buf(&self.act.borrow(), 0, 2); e.buf(&self.kv_swa.borrow(), 0, 3); e.buf(&self.cs, 0, 4); e.buf(&self.toks, 0, 6);
         e.buf(&self.ctr, 0, 7);
     }
 
     fn seg(w: &QW, in_off: u32, out_off: u32) -> Seg {
-        debug_assert!(w.ty == T_Q4_K || w.ty == T_Q6_K);
+        debug_assert!(matches!(w.ty, T_Q4_K | T_Q6_K | T_Q8_0));
         Seg { w_lo: w.off as u32, w_hi: (w.off >> 32) as u32, row_bytes: w.row_bytes, wtype: w.ty, nrows: w.rows, k: w.k,
               in_off, in2_off: -1, norm_off: -1, ss_off: -1, ss_n: 0, out_off, ..Default::default() }
     }
@@ -1583,10 +1786,13 @@ impl Engine {
             // independent jobs run concurrently (no barrier between them)
             for j in jobs {
                 let j = MixJob { ntok: t as u32, ..*j };
-                let name = if j.q_off < 0 { "k_mix_b_id".to_string() } else { format!("k_mix_b_{}_{}", j.n_s, j.n_q) };
+                // verify passes (2..=8 tokens): the wide kernel, one threadgroup per token
+                let wide = self.verify.get() && t <= 8;
+                let k = if wide { "k_mix_bw" } else { "k_mix_b" };
+                let name = if j.q_off < 0 { format!("{k}_id") } else { format!("{k}_{}_{}", j.n_s, j.n_q) };
                 e.pso(&self.gpu.pso(&name));
                 e.bytes(&j, 5);
-                e.dispatch((t.div_ceil(4), 1, 1), 128);
+                if wide { e.dispatch((t, 1, 1), 256); } else { e.dispatch((t.div_ceil(4), 1, 1), 128); }
             }
             e.barrier();
             return;
@@ -1647,7 +1853,10 @@ impl Engine {
         let mut va = VecAlloc { next: 1, n: N_VEC };
         let mut blocks: Vec<usize> = Vec::new();
         let mut cur = 0usize;
-        for ip in 0..LOOP_START { cur = self.layer(cx, pos, ip, ip, cur, &mut blocks, None, &mut va, &[]); }
+        for ip in 0..LOOP_START {
+            if let Some(f) = Self::tap_feature(Self::visit_of(ip, 0)) { self.tap(&cx.e, f, Arena::vec(cur), false, pos, 1); }
+            cur = self.layer(cx, pos, ip, ip, cur, &mut blocks, None, &mut va, &[]);
+        }
         let prelude = cur;
         let prelude_blocks = blocks.clone();
         let mut bank = (0usize, 0usize);
@@ -1656,6 +1865,7 @@ impl Engine {
             let msg = if pass > 0 { Some(bank) } else { None };
             let pinned: Vec<usize> = { let mut p = vec![prelude]; if pass > 0 { p.push(bank.0); p.push(bank.1); } p };
             for ip in LOOP_START..LOOP_END {
+                if let Some(f) = Self::tap_feature(Self::visit_of(ip, pass)) { self.tap(&cx.e, f, Arena::vec(cur), false, pos, 1); }
                 cur = self.layer(cx, pos, slot_of(pass, ip), ip, cur, &mut blocks, msg, &mut va, &pinned);
             }
             bank = (*blocks.get(prelude_blocks.len() + 1).unwrap_or(&0), cur);
@@ -1667,14 +1877,27 @@ impl Engine {
             let mut st = blocks.clone(); st.push(cur);
             let j = self.mix_job(&st, self.output_res_query as i32, 1, &[ar.fout], &[self.output_norm as i32]);
             self.mix(e, C_OMIX, &[j]);
+            self.tap(e, 3, ar.fout, false, pos, 1);
             self.mv(e, C_LMHEAD, &[Self::seg(&self.output, ar.fout, ar.logits)]);
         }
-        if logits && argmax {
-            let nparts = 128u32;
-            let am = ArgmaxArgs { logits_off: ar.logits, n: self.n_vocab as u32, part_off: ar.amax, nparts, out_index: pos as u32 + 1, pad: [0; 3] };
-            self.go(e, C_ARGMAX, "k_argmax1", &am, (nparts as usize, 1, 1), 1024);
-            self.go(e, C_ARGMAX, "k_argmax2", &am, (1, 1, 1), 32);
-        }
+        if logits && argmax { self.sample_tail(e, pos); }
+    }
+    /// the logits' argmax -> toks[pos + 1]; with `samp` set, a Gumbel-max draw and the thinking budget's state machine
+    fn sample_tail(&self, e: &Enc, pos: usize) {
+        let samp = self.samp.get().map(|s| SampArgs { pos: pos as u32, logits_off: self.ar.logits, ..s });
+        if let Some(s) = &samp { self.go(e, C_ARGMAX, "k_gumbel", s, (self.n_vocab.div_ceil(256), 1, 1), 256); }
+        let nparts = 128u32;
+        let am = ArgmaxArgs { logits_off: self.ar.logits, n: self.n_vocab as u32, part_off: self.ar.amax, nparts, out_index: pos as u32 + 1, pad: [0; 3] };
+        self.go(e, C_ARGMAX, "k_argmax1", &am, (nparts as usize, 1, 1), 1024);
+        self.go(e, C_ARGMAX, "k_argmax2", &am, (1, 1, 1), 32);
+        if let Some(s) = &samp { self.go(e, C_ARGMAX, "k_sampstate", s, (1, 1, 1), 32); }
+    }
+    /// Draw toks[pos + 1] from the logits already in the arena (the last prefill's), as a decode step's tail does.
+    pub fn encode_sample(&self, cb: &CmdBuf, pos: usize) {
+        let e = Enc::new(cb);
+        self.bind(&e);
+        self.sample_tail(&e, pos);
+        e.end();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1823,7 +2046,8 @@ impl Engine {
             act_off: ar.act, wscale: self.wscale, beta: self.situ_beta, lbeta: self.situ_lbeta,
             dn_lo: l.dn.off as u32, dn_hi: (l.dn.off >> 32) as u32, dn_expert_bytes: l.dn.expert_bytes as u32, dn_row_bytes: l.dn.row_bytes,
             dn_type: l.dn.ty, out_off: Arena::vec(out), res_off: Arena::vec(mid) as i32, cs_off: cs_slot + ((2 * NKV * HD + E) * 3) as u32,
-            convw_off: l.ffn_post_conv, pad: [0; 3],
+            convw_off: l.ffn_post_conv, gu_type: l.gu.ty, gu_gs_lo: l.gu.gs as u32, gu_gs_hi: (l.gu.gs >> 32) as u32,
+            dn_gs_lo: l.dn.gs as u32, dn_gs_hi: (l.dn.gs >> 32) as u32, pad: [0; 2],
         };
         // ---- experts
         self.go(e, C_GU, "k_moe_gu", &ma, (FF / 4, TOPK, 1), 128);
@@ -1893,6 +2117,14 @@ impl Engine {
     }
     /// fp16-activation tensor GEMM over segments (weight, wsrc, half input, output, ldo); barrier after
     fn gemm_h(&self, e: &Enc, cls: u32, segs: &[HSeg], t: usize) {
+        // small T (a speculative verify, DSPARK.md): the decode-style matvec, if every segment's type has one
+        if self.verify.get() && (2..=8).contains(&t) && segs.iter().all(|s| matches!(s.wtype, T_Q8_0 | T_Q6_K | T_BF16)) && std::env::var("INK_NO_MVT").is_err() {
+            let mut a = GemmHArgs { nseg: segs.len() as u32, t: t as u32, ..Default::default() };
+            let mut tiles = 0u32;
+            for (i, sg) in segs.iter().enumerate() { a.seg[i] = *sg; a.seg[i].tile_start = tiles; tiles += sg.nrows.div_ceil(8); }
+            self.go(e, cls, &format!("k_mvT{t}"), &a, (tiles as usize, 1, 1), 128);
+            return;
+        }
         let mut a = GemmHArgs { nseg: segs.len() as u32, t: t as u32, ..Default::default() };
         let mut tiles = 0u32;
         for (i, sg) in segs.iter().enumerate() { a.seg[i] = *sg; a.seg[i].tile_start = tiles; tiles += sg.nrows.div_ceil(64); }
@@ -1925,11 +2157,14 @@ impl Engine {
         // rows of the two branch outputs). It is a full-attention layer, so K/V still cover every token, but queries, attention,
         // output projection and FFN only run from row t-8: the conv/residual chain makes rows >= t-2 of the result exact.
         let mut trim = [0usize; N_PHYS];
-        if self.hgemm && self.tail.get() && t > 16 { trim[N_PHYS - 1] = t - 8; }
+        if self.hgemm && self.tail.get() && t > 16 && !self.taps_on.get() { trim[N_PHYS - 1] = t - 8; }      // taps need every row
         let mut va = VecAlloc { next: 1, n: B_NVEC };
         let mut blocks: Vec<usize> = Vec::new();
         let mut cur = 0usize;
-        for ip in 0..LOOP_START { cur = self.layer_b(&e, p0, t, ip, ip, cur, &mut blocks, None, &mut va, &[], trim[ip]); }
+        for ip in 0..LOOP_START {
+            if let Some(f) = Self::tap_feature(Self::visit_of(ip, 0)) { self.tap(&e, f, b.vec(cur), false, p0, t); }
+            cur = self.layer_b(&e, p0, t, ip, ip, cur, &mut blocks, None, &mut va, &[], trim[ip]);
+        }
         let prelude = cur;
         let prelude_blocks = blocks.clone();
         let mut bank = (0usize, 0usize);
@@ -1937,11 +2172,38 @@ impl Engine {
             if pass > 0 { cur = prelude; blocks = prelude_blocks.clone(); }
             let msg = if pass > 0 { Some(bank) } else { None };
             let pinned: Vec<usize> = { let mut p = vec![prelude]; if pass > 0 { p.push(bank.0); p.push(bank.1); } p };
-            for ip in LOOP_START..LOOP_END { cur = self.layer_b(&e, p0, t, slot_of(pass, ip), ip, cur, &mut blocks, msg, &mut va, &pinned, 0); }
+            for ip in LOOP_START..LOOP_END {
+                if let Some(f) = Self::tap_feature(Self::visit_of(ip, pass)) { self.tap(&e, f, b.vec(cur), false, p0, t); }
+                cur = self.layer_b(&e, p0, t, slot_of(pass, ip), ip, cur, &mut blocks, msg, &mut va, &pinned, 0);
+            }
             bank = (blocks[prelude_blocks.len() + 1], cur);
         }
         for ip in LOOP_END..N_PHYS { cur = self.layer_b(&e, p0, t, ip, ip, cur, &mut blocks, None, &mut va, &[], trim[ip]); }
-        if logits {
+        if logits && self.verify.get() {
+            // every position: one batched output mix into half rows, then the output head over all of them
+            let mut st: Vec<u32> = blocks.iter().map(|&v| b.vec(v)).collect();
+            st.push(b.vec(cur));
+            let mut j = self.mix_job_off(&st, self.output_res_query as i32, 1, &[b.fin], &[self.output_norm as i32], E as u32);
+            j.hout[0] = b.fh as i32;
+            j.nof32 = 1;
+            self.mix_t(&e, C_OMIX, &[j], t);
+            self.tap(&e, 3, b.fh, true, p0, t);
+            let mut h = Self::hseg(&self.output, b.fh, self.ar.vlog);
+            h.ldo = self.output.rows;
+            self.gemm_h(&e, C_LMHEAD, &[h], t);
+        } else if logits || self.taps_on.get() {
+            if self.taps_on.get() {
+                // the final-norm output of every row, for the drafter's context (feature 3)
+                let mut st: Vec<u32> = blocks.iter().map(|&v| b.vec(v)).collect();
+                st.push(b.vec(cur));
+                let mut j = self.mix_job_off(&st, self.output_res_query as i32, 1, &[b.fin], &[self.output_norm as i32], E as u32);
+                j.hout[0] = b.fh as i32;
+                j.nof32 = 1;
+                self.mix_t(&e, C_OMIX, &[j], t);
+                self.tap(&e, 3, b.fh, true, p0, t);
+            }
+        }
+        if logits && !self.verify.get() {
             let ar = self.ar;
             let last = ((t - 1) * E) as u32;
             let mut st: Vec<u32> = blocks.iter().map(|&v| b.vec(v) + last).collect();
@@ -1957,6 +2219,110 @@ impl Engine {
             }
         }
         e.end();
+    }
+
+    /// Encode a speculative verify pass (DSPARK.md) over toks[p0..p0+t], 2 <= t <= 8: the batched path with the small-T
+    /// kernels, and the logits of every position (verify_logits). Prefill is unaffected: the kernels are used only here.
+    /// Needs a batch arena of VERIFY_BATCH rows (ensure_batch).
+    pub fn encode_verify(&self, cb: &CmdBuf, p0: usize, t: usize) {
+        assert!((2..=8).contains(&t) && self.hgemm, "verify passes are 2..=8 tokens on the fp16 path");
+        assert!(self.ba.get().cap >= VERIFY_BATCH, "verify passes need ensure_batch(VERIFY_BATCH)");
+        let tail = self.tail.get();
+        self.verify.set(true);
+        self.tail.set(false);
+        self.encode_prefill(cb, p0, t, true, false);
+        self.tail.set(tail);
+        self.verify.set(false);
+    }
+    /// DSpark tap feature of layer visit v (target_layer_ids 5, 23, 41 -> features 0, 1, 2), if any
+    fn tap_feature(v: usize) -> Option<u32> { match v { 5 => Some(0), 23 => Some(1), 41 => Some(2), _ => None } }
+    /// layer visit index of physical layer ip on loop pass `pass` (prelude, three core passes, coda)
+    fn visit_of(ip: usize, pass: usize) -> usize {
+        if ip < LOOP_START { ip } else if ip < LOOP_END { LOOP_START + pass * (LOOP_END - LOOP_START) + (ip - LOOP_START) } else { LOOP_START + N_PASS * (LOOP_END - LOOP_START) + (ip - LOOP_END) }
+    }
+    /// copy n rows of features (f32 or half) for positions pos0.. into the tap ring
+    fn tap(&self, e: &Enc, feat: u32, src_off: u32, src_half: bool, pos0: usize, n: usize) {
+        if !self.taps_on.get() { return; }
+        let a = TapArgs { src_off, src_half: src_half as u32, n: n as u32, pos0: pos0 as u32, from: self.tap_from.get() as u32, feat, ring_off: self.ar.taps, pad: 0 };
+        e.pso(&self.gpu.pso("k_tapcopy")); e.bytes(&a, 5); e.dispatch((E.div_ceil(256), n, 1), 256); e.barrier();
+    }
+    /// the tap ring row of position `pos`, feature f (0..4), as written by the last passes
+    pub fn tap_row(&self, pos: usize, f: usize) -> Vec<f32> { self.arena(self.ar.taps + (((pos % 1024) * 4 + f) * E) as u32, E) }
+    /// where k_state_upd records slot `slot`'s conv history (channel offset `choff`) in a verify pass; none otherwise
+    fn hist_at(&self, slot: usize, choff: usize) -> u32 {
+        if self.verify.get() { self.ar.vhist + (slot * 11 * NCH + choff) as u32 } else { u32::MAX }
+    }
+    /// The sliding-window ring rows a verify pass over positions p..p+t will overwrite (every window slot, K and V), so a
+    /// rollback can put back the rows of rejected positions. Call with the GPU idle.
+    pub fn swa_save(&self, p: usize, t: usize) -> Vec<u8> {
+        assert!(!self.kv8, "rollback assumes the fp16 cache");
+        let kv = self.kv_swa.borrow();
+        let base = kv.contents().as_ptr() as *const u8;
+        let row = HD * self.kvb;
+        let mut out = Vec::new();
+        for slot in 0..N_SLOT {
+            if !self.slot_kind[slot].0 { continue; }
+            let (kb, vb, cap) = self.kv_slot(slot);
+            for which in [kb, vb] { for g in 0..NKV { for j in 0..t {
+                let idx = which as usize + (g * cap as usize + (p + j) % cap as usize) * HD;
+                out.extend_from_slice(unsafe { std::slice::from_raw_parts(base.add(idx * self.kvb), row) });
+            } } }
+        }
+        out
+    }
+    /// After a verify pass over positions p..p+t that keeps the first `keep` tokens: rebuild the conv state from the
+    /// pass's history and put back the window rows of the rejected positions (`saved` from swa_save). The full-attention
+    /// cache needs nothing: rejected positions are overwritten later. Call with the GPU idle.
+    pub fn verify_rollback(&self, saved: &[u8], p: usize, t: usize, keep: usize) {
+        assert!(keep >= 1 && keep <= t);
+        if keep == t { return; }
+        let hist = unsafe { (self.act.borrow().contents().as_ptr() as *const f32).add(self.ar.vhist as usize) };
+        let cs = self.cs.contents().as_ptr() as *mut f32;
+        for slot in 0..N_SLOT {
+            for ch in 0..NCH {
+                for j in 0..3 {
+                    // new state j = sequence [old 3 rows, x_0 .. x_{keep-1}] at index keep + j
+                    let v = unsafe { *hist.add((slot * 11 + keep + j) * NCH + ch) };
+                    unsafe { *cs.add(slot * NCH * 3 + ch * 3 + j) = v; }
+                }
+            }
+        }
+        let kv = self.kv_swa.borrow();
+        let base = kv.contents().as_ptr() as *mut u8;
+        let row = HD * self.kvb;
+        let mut k = 0;
+        for slot in 0..N_SLOT {
+            if !self.slot_kind[slot].0 { continue; }
+            let (kb, vb, cap) = self.kv_slot(slot);
+            for which in [kb, vb] { for g in 0..NKV { for j in 0..t {
+                if j >= keep {
+                    let idx = which as usize + (g * cap as usize + (p + j) % cap as usize) * HD;
+                    unsafe { std::ptr::copy_nonoverlapping(saved.as_ptr().add(k * row), base.add(idx * self.kvb), row); }
+                }
+                k += 1;
+            } } }
+        }
+    }
+    /// The target's tokens for a verify pass's t positions (q .. q + t): with `samp`, its Gumbel draw at each position
+    /// (the noise plain decoding would use there); without, argmax. Into spare token slots (verify_token).
+    pub fn encode_verify_sample(&self, cb: &CmdBuf, q: usize, t: usize, samp: Option<SampArgs>) {
+        assert!(t <= 5);
+        let e = Enc::new(cb);
+        self.bind(&e);
+        let rows = self.output.rows as usize;
+        for i in 0..t {
+            let lo = self.ar.vlog + (i * rows) as u32;
+            if let Some(sa) = samp { self.go(&e, C_ARGMAX, "k_gumbel", &SampArgs { logits_off: lo, pos: (q + i) as u32, ..sa }, (self.n_vocab.div_ceil(256), 1, 1), 256); }
+            let am = ArgmaxArgs { logits_off: lo, n: self.n_vocab as u32, part_off: self.ar.amax, nparts: 128, out_index: (self.max_ctx + 3 + i) as u32, pad: [0; 3] };
+            self.go(&e, C_ARGMAX, "k_argmax1", &am, (128, 1, 1), 1024);
+            self.go(&e, C_ARGMAX, "k_argmax2", &am, (1, 1, 1), 32);
+        }
+        e.end();
+    }
+    pub fn verify_token(&self, i: usize) -> u32 { self.token_at(self.max_ctx + 3 + i) }
+    /// position i's logits from the last verify pass
+    pub fn verify_logits(&self, i: usize) -> &[f32] {
+        unsafe { std::slice::from_raw_parts((self.act.borrow().contents().as_ptr() as *const f32).add(self.ar.vlog as usize + i * self.output.rows as usize), self.n_vocab) }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2062,9 +2428,9 @@ impl Engine {
             self.bind_kv(e, false);
         }
         if l.swa { kcopy(t.min(EXT), p0 + t - t.min(EXT), 1); }
-        let su = StateArgs { x_off: b.k, ldx: (NKV * HD) as u32, cs_off: cs_slot, nch: (NKV * HD) as u32, t: tt, pad: [0; 3] };
+        let su = StateArgs { x_off: b.k, ldx: (NKV * HD) as u32, cs_off: cs_slot, nch: (NKV * HD) as u32, t: tt, hist_off: self.hist_at(slot, 0), pad: [0; 2] };
         self.go(e, C_KVPREP, "k_state_upd", &su, (NKV * HD / 256, 1, 1), 256);
-        let su = StateArgs { x_off: b.v, ldx: (NKV * HD) as u32, cs_off: cs_slot + (NKV * HD * 3) as u32, nch: (NKV * HD) as u32, t: tt, pad: [0; 3] };
+        let su = StateArgs { x_off: b.v, ldx: (NKV * HD) as u32, cs_off: cs_slot + (NKV * HD * 3) as u32, nch: (NKV * HD) as u32, t: tt, hist_off: self.hist_at(slot, NKV * HD), pad: [0; 2] };
         self.go(e, C_KVPREP, "k_state_upd", &su, (NKV * HD / 256, 1, 1), 256);
         // ---- attention (causal, query-tiled)
         let aa = AttnBArgs { t: tt, p0: p0 as u32, ring: 0, cap, k_base: pk, v_base: pv,
@@ -2073,7 +2439,20 @@ impl Engine {
         if hatt {
             let ah = AttnBArgs { t: nn_, p0: (p0 + ts) as u32, qp_off: sh(b.qp, NH * HD / 2), rp_off: sh(b.rp, NH * NREL), sink_off: sh(b.sink, NH),
                                  gate_off: sh(b.gate, if qgh { NH * HD / 2 } else { NH * HD }), out_off: sh(b.agh, NH * HD / 2), ghalf: qgh as u32, ..aa };
-            self.go(e, C_ATTN, "k_attn_h", &ah, (n.div_ceil(32), NH, 1), 256);
+            if self.verify.get() && (2..=8).contains(&n) && std::env::var("INK_NO_ATTNT").is_err() {
+                // small T (a speculative verify, DSPARK.md): k_attn_h split over the keys, about 10 ranges of 64k keys
+                let (pf, pl) = (p0 + ts, p0 + ts + n - 1);
+                let kstart = (if l.swa && pf + 1 > EXT { pf + 1 - EXT } else { 0 }) / 64 * 64;
+                let nk = pl + 1 - kstart;
+                let kps = 64 * nk.div_ceil(64 * 10);
+                let nsplit = nk.div_ceil(kps);
+                assert!(nsplit * n <= MAX_SPLIT);
+                let at = AttnHsArgs { b: ah, kps: kps as u32, nsplit: nsplit as u32, part_off: self.ar.part, pad: 0 };
+                self.go(e, C_ATTN, "k_attn_hs", &at, (nsplit, NH, 1), 256);
+                self.go(e, C_ATTN, "k_attn_hs_comb", &at, (n, NH, 1), HD);
+            } else {
+                self.go(e, C_ATTN, "k_attn_h", &ah, (n.div_ceil(32), NH, 1), 256);
+            }
         }
         else if self.tensor { self.go(e, C_ATTN, "k_attn_bt", &aa, (t.div_ceil(32), NH, 1), 256); }
         else { self.go(e, C_ATTN, "k_attn_b", &aa, (t.div_ceil(8), NKV, 1), 128); }
@@ -2091,7 +2470,7 @@ impl Engine {
         let cv = ConvBArgs { y_off: sh(b.wo_y, E), ldy: es, res_off: sh(vo(cur), E), out_off: sh(vo(mid), E), cs_off: cs_slot + (2 * NKV * HD * 3) as u32,
                              convw_off: l.attn_post_conv, has_res: (!block_start) as u32, pad: 0 };
         self.go(e, C_WOPOST, "k_postconv_b", &cv, (E / 256, n, 1), 256);
-        let su = StateArgs { x_off: b.wo_y, ldx: es, cs_off: cs_slot + (2 * NKV * HD * 3) as u32, nch: es, t: tt, pad: [0; 3] };
+        let su = StateArgs { x_off: b.wo_y, ldx: es, cs_off: cs_slot + (2 * NKV * HD * 3) as u32, nch: es, t: tt, hist_off: self.hist_at(slot, 2 * NKV * HD), pad: [0; 2] };
         self.go(e, C_WOPOST, "k_state_upd", &su, (E / 256, 1, 1), 256);
         if block_start { blocks.push(cur); }
         // ---- FFN input
@@ -2116,70 +2495,13 @@ impl Engine {
         else { self.gemm(e, C_ROUTER, &[rs], n); }
         let ta = TopkBArgs { logits_off: b.rlog, bias_off: l.exp_bias, sel_off: b.sel, t: nn_, wscale: self.wscale, pad: [0; 3] };
         self.go(e, C_TOPK, "k_topk_b", &ta, (n, 1, 1), 32);
-        let tile = 32usize;
-        if self.hgemm {
-            let ra = Route3Args { sel_off: b.sel, t: nn_, perm_off: b.perm, inv_off: b.inv, aw_off: b.aw, ind_off: b.ind, gu_y: (FF / 32) as u32,
-                                  dn_y: (E / 64) as u32, tiles_off: b.tl, pad: [0; 2] };
-            self.go(e, C_TOPK, "k_moe_route3", &ra, (1, 1, 1), 1024);
-        } else {
-            let ra = RouteArgs { sel_off: b.sel, t: tt, perm_off: b.perm, inv_off: b.inv, tiles_off: b.tiles, ntiles_off: b.ntiles, tile: tile as u32, pad: 0 };
-            self.go(e, C_ROUTER, "k_moe_route", &ra, (1, 1, 1), 1024);
-        }
-        let max_tiles = (t * TOPK).div_ceil(tile) + NEXP;
-        let gu = MoeGemmArgs {
-            w_lo: l.gu.off as u32, w_hi: (l.gu.off >> 32) as u32, expert_bytes: l.gu.expert_bytes as u32, row_bytes: l.gu.row_bytes,
-            wtype: l.gu.ty, nrows: (2 * FF) as u32, k: es, x_off: x, gather: 1, perm_off: b.perm, tiles_off: b.tiles, ntiles_off: b.ntiles,
-            out_off: b.act, ldo: FF as u32, situ: 1, pad: 0, beta: self.situ_beta, lbeta: self.situ_lbeta, pad2: [0.0; 2],
-        };
-        let mg = if self.tensor { "k_moe_gemm_t" } else { "k_moe_gemm" };
-        if self.hgemm {
-            // gather the FFN input rows of every (token, expert) assignment into contiguous half rows
-            // gather the FFN input rows of every (token, expert) assignment into contiguous half rows
-            self.tohalf_x(e, C_GATHER, sh(b.fh, E / 2), E, b.xgh, E, E, n * TOPK, Some(b.perm), true);
-            e.barrier();
-            // tiles in four widths, sized on the GPU by the routing kernel (indirect dispatch); classes run concurrently
-            if self.skip.get() & (1 << C_GU) == 0 {
-                for (c, (name, _, tg)) in MOE_CLS.iter().enumerate() {
-                    let g = MoeGemmHArgs {
-                        w_lo: l.gu.off as u32, w_hi: (l.gu.off >> 32) as u32, expert_bytes: l.gu.expert_bytes as u32, row_bytes: l.gu.row_bytes,
-                        wtype: l.gu.ty, nrows: (2 * FF) as u32, k: es, xh_off: b.xgh, tiles_off: b.tl[c], ntiles_off: b.ind + (c * 4) as u32,
-                        out_off: b.acth, ldo: FF as u32, situ: 1, aw_off: b.aw, beta: self.situ_beta, lbeta: self.situ_lbeta,
-                    };
-                    e.pso(&self.gpu.pso(name)); e.bytes(&g, 5);
-                    e.dispatch_indirect(&self.act.borrow(), (b.ind as usize + c * 4) * 4, *tg);
-                }
-                e.barrier();
-            }
-            if self.skip.get() & (1 << C_DOWN) == 0 {
-                for (c, (name, _, tg)) in MOE_CLS.iter().enumerate() {
-                    let d = MoeGemmHArgs {
-                        w_lo: l.dn.off as u32, w_hi: (l.dn.off >> 32) as u32, expert_bytes: l.dn.expert_bytes as u32, row_bytes: l.dn.row_bytes,
-                        wtype: l.dn.ty, nrows: es, k: FF as u32, xh_off: b.acth, tiles_off: b.tl[c], ntiles_off: b.ind + (c * 4) as u32,
-                        out_off: b.yd, ldo: es, situ: 0, aw_off: 0, beta: 0.0, lbeta: 0.0,
-                    };
-                    e.pso(&self.gpu.pso(name)); e.bytes(&d, 5);
-                    e.dispatch_indirect(&self.act.borrow(), (b.ind as usize + 4 * NTC + c * 4) * 4, *tg);
-                }
-                e.barrier();
-            }
-        } else {
-        self.go(e, C_GU, mg, &gu, (FF / 32, max_tiles, 1), 128);
-        let dn = MoeGemmArgs {
-            w_lo: l.dn.off as u32, w_hi: (l.dn.off >> 32) as u32, expert_bytes: l.dn.expert_bytes as u32, row_bytes: l.dn.row_bytes,
-            wtype: l.dn.ty, nrows: es, k: FF as u32, x_off: b.act, gather: 0, perm_off: b.perm, tiles_off: b.tiles, ntiles_off: b.ntiles,
-            out_off: b.yd, ldo: es, situ: 0, pad: 0, beta: 0.0, lbeta: 0.0, pad2: [0.0; 2],
-        };
-        self.go(e, C_DOWN, mg, &dn, (E / 64, max_tiles, 1), 128);
-        }
-        let ca = MoeCombArgs { yd_off: b.yd, inv_off: b.inv, sel_off: b.sel, out_off: sh(b.ffn_y, E) };
-        if self.hgemm { self.go(e, C_COMB2, "k_moe_comb_h", &ca, (n, E.div_ceil(1024), 1), 256); }
-        else { self.go(e, C_DOWN, "k_moe_comb_b", &ca, (E / 256, t, 1), 256); }
+        self.moe_ffn(e, l, b, t, ts, x);
         let mut live: Vec<usize> = blocks.clone(); live.push(mid); live.extend_from_slice(pinned);
         let out = va.alloc(&live);
         let cv = ConvBArgs { y_off: sh(b.ffn_y, E), ldy: es, res_off: sh(vo(mid), E), out_off: sh(vo(out), E), cs_off: cs_slot + ((2 * NKV * HD + E) * 3) as u32,
                              convw_off: l.ffn_post_conv, has_res: 1, pad: 0 };
         self.go(e, C_FFNPOST, "k_postconv_b", &cv, (E / 256, n, 1), 256);
-        let su = StateArgs { x_off: b.ffn_y, ldx: es, cs_off: cs_slot + ((2 * NKV * HD + E) * 3) as u32, nch: es, t: tt, pad: [0; 3] };
+        let su = StateArgs { x_off: b.ffn_y, ldx: es, cs_off: cs_slot + ((2 * NKV * HD + E) * 3) as u32, nch: es, t: tt, hist_off: self.hist_at(slot, 2 * NKV * HD + E), pad: [0; 2] };
         self.go(e, C_FFNPOST, "k_state_upd", &su, (E / 256, 1, 1), 256);
         out
     }

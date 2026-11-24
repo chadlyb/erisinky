@@ -2,6 +2,7 @@ mod engine;
 mod gguf;
 mod metal;
 mod sampler;
+mod serve;
 mod session;
 mod tokenizer;
 mod unicode_tables;
@@ -23,6 +24,7 @@ commands:
   chat              interactive multi-turn chat (KV cache reused across turns)
   run -p TEXT       one prompt, streamed
   bench             greedy prefill + decode benchmark
+  serve             long-lived engine for the inkserve front end (stdin/stdout protocol, see serve.rs)
   check --ref P     compare logits against a llama.cpp reference dump (tools/ref_logits)
 
 options:
@@ -356,6 +358,260 @@ fn prof(o: &Opts) {
     println!("  everything skipped: {rest:.3} ms | sum of classes {tot:.3} ms");
 }
 
+/// dev (DSPARK.md): the speculative verify pass. Prefill a real transcript (-f FILE, raw text) up to position -n, then
+/// time Engine::encode_verify over the next T tokens against T chained decode steps, compare every position's logits
+/// with the decode steps' (from the same snapshot, at positions every INK_PV_STEP tokens), and break the pass's time
+/// down by kernel class.
+fn prof_verify(o: &Opts) {
+    let eng = Engine::load(&o.model, o.ctx);
+    eng.reserve(o.ctx, false); eng.ensure_batch(eng.chunk);
+    eng.reset();
+    let tk = Tokenizer::load(&eng.g);
+    let toks = tk.encode(&o.prompt, true);
+    assert!(toks.len() > 80, "need a transcript of more than 80 tokens");
+    let p0 = o.n.min(toks.len() - 40);
+    eng.set_tokens(0, &toks);
+    let fill = |upto: usize| { eng.reset(); let mut q = 0; while q < upto { let m = (upto - q).min(eng.chunk); let cb = eng.gpu.cmd(); eng.encode_prefill(&cb, q, m, false, false); cb.commit(); cb.waitUntilCompleted(); q += m; } };
+    fill(p0);
+    let med = |mut v: Vec<f64>| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] };
+    let ver = |p: usize, t: usize| { let cb = eng.gpu.cmd(); eng.encode_verify(&cb, p, t); cb.commit(); cb.waitUntilCompleted(); (cb.GPUEndTime() - cb.GPUStartTime()) * 1e3 };
+    let dec = |p: usize, t: usize| { let cb = eng.gpu.cmd(); for i in 0..t { eng.encode_step(&cb, p + i, true, false); } cb.commit(); cb.waitUntilCompleted(); (cb.GPUEndTime() - cb.GPUStartTime()) * 1e3 };
+    println!("transcript {} tokens, verify at position {p0}", toks.len());
+    println!("{:>3} {:>11} {:>12} {:>7}", "T", "verify ms", "T steps ms", "ratio");
+    for t in [2usize, 3, 4, 6, 8] {
+        ver(p0, t); dec(p0, t);
+        let a = med((0..5).map(|_| ver(p0, t)).collect());
+        let b = med((0..5).map(|_| dec(p0, t)).collect());
+        println!("{t:>3} {a:>11.2} {b:>12.2} {:>7.2}", a / b);
+    }
+    // agreement at every position of the span
+    let sc = eng.softcap;
+    let soft = |v: &[f32]| -> Vec<f64> {
+        let z: Vec<f64> = v.iter().map(|&x| (if sc > 0.0 { sc * (x / sc).tanh() } else { x }) as f64).collect();
+        let m = z.iter().cloned().fold(f64::MIN, f64::max);
+        let lse = m + z.iter().map(|x| (x - m).exp()).sum::<f64>().ln();
+        z.iter().map(|x| x - lse).collect()
+    };
+    let am = |v: &[f32]| v.iter().enumerate().fold((0, f32::MIN), |b, (i, &x)| if x > b.1 { (i, x) } else { b }).0;
+    let step: usize = std::env::var("INK_PV_STEP").ok().and_then(|v| v.parse().ok()).unwrap_or(250);
+    for t in [2usize, 4, 8] {
+        let (mut agree, mut n, mut kl_sum, mut worst, mut wpos) = (0usize, 0usize, 0f64, 0f64, 0usize);
+        for start in (300..toks.len().saturating_sub(t + 1)).step_by(step) {
+            fill(start);
+            let snap = eng.snapshot();
+            let mut dl: Vec<Vec<f32>> = Vec::new();
+            for i in 0..t { let cb = eng.gpu.cmd(); eng.encode_step(&cb, start + i, true, false); cb.commit(); cb.waitUntilCompleted(); dl.push(eng.logits().to_vec()); }
+            eng.restore(&snap);
+            ver(start, t);
+            for i in 0..t {
+                let v = eng.verify_logits(i);
+                let (ld, lv) = (soft(&dl[i]), soft(v));
+                let kl: f64 = ld.iter().zip(&lv).map(|(x, y)| x.exp() * (x - y)).sum();
+                kl_sum += kl; n += 1;
+                if kl > worst { worst = kl; wpos = start + i; }
+                agree += (am(&dl[i]) == am(v)) as usize;
+            }
+        }
+        println!("T={t}: every position vs decode steps: top-1 {agree}/{n}, mean KL {:.4}, worst {worst:.4} at {wpos}", kl_sum / n.max(1) as f64);
+    }
+    // where a verify pass spends its time: each class alone (as prof_pf), minus the empty pass
+    fill(p0);
+    let pfs = |t: usize, skip: u32| { eng.skip.set(skip); let r = ver(p0, t); eng.skip.set(0); r };
+    for t in [4usize] {
+        let empty = med((0..3).map(|_| pfs(t, u32::MAX)).collect());
+        println!("T={t}: classes alone (ms; empty pass {empty:.2})");
+        let mut tot = 0.0;
+        for (c, name) in engine::CLS_NAMES.iter().enumerate() {
+            let d = med((0..3).map(|_| pfs(t, !(1u32 << c) & !(1 << 21))).collect()) - empty;
+            tot += d;
+            if d > 0.2 { println!("  {name:>11}: {d:7.2}"); }
+        }
+        println!("  sum {tot:.1}");
+    }
+}
+
+/// dev (DSPARK.md): the drafter's target features (taps) from a chunked prefill against taps from decode steps over
+/// the same tokens (-f FILE raw, first -n tokens). They differ only by rounding (batched vs step arithmetic).
+fn tapcheck(o: &Opts) {
+    let eng = Engine::load(&o.model, o.ctx);
+    eng.reserve(o.ctx, false); eng.ensure_batch(eng.chunk);
+    let tk = Tokenizer::load(&eng.g);
+    let toks = tk.encode(&o.prompt, true);
+    let n = toks.len().min(o.n);
+    eng.taps_on.set(true); eng.tap_from.set(0);
+    eng.reset(); eng.set_tokens(0, &toks[..n]);
+    let mut q = 0;
+    while q < n { let m = (n - q).min(512); let cb = eng.gpu.cmd(); eng.encode_prefill(&cb, q, m, false, false); cb.commit(); cb.waitUntilCompleted(); q += m; }
+    let probe: Vec<usize> = (0..6).map(|i| n - 1 - i * 37).collect();
+    let a: Vec<Vec<Vec<f32>>> = probe.iter().map(|&p| (0..4).map(|f| eng.tap_row(p, f)).collect()).collect();
+    eng.reset(); eng.set_tokens(0, &toks[..n]);
+    if let Ok(c) = std::env::var("INK_TC_CHUNK") {
+        // a second prefill split differently: prefill results do not depend on the split, so taps must match exactly
+        let c: usize = c.parse().unwrap();
+        let mut q = 0;
+        while q < n { let m = (n - q).min(c); let cb = eng.gpu.cmd(); eng.encode_prefill(&cb, q, m, false, false); cb.commit(); cb.waitUntilCompleted(); q += m; }
+    } else {
+        for pos in 0..n { let cb = eng.gpu.cmd(); eng.encode_step(&cb, pos, true, false); cb.commit(); cb.waitUntilCompleted(); }
+    }
+    for (k, &p) in probe.iter().enumerate() {
+        let mut line = format!("position {p}:");
+        for f in 0..4 {
+            let b = eng.tap_row(p, f);
+            let num: f64 = a[k][f].iter().zip(&b).map(|(x, y)| ((x - y) as f64).powi(2)).sum();
+            let den: f64 = b.iter().map(|y| (*y as f64).powi(2)).sum();
+            let rms = (den / engine::E as f64).sqrt();
+            line += &format!("  f{f} rel {:.2e} (rms {rms:.2})", (num / den.max(1e-30)).sqrt());
+        }
+        println!("{line}");
+    }
+}
+
+/// dev (DSPARK.md): the drafter's acceptance on a transcript (-f FILE raw, drafter GGUF from --ref). At positions every
+/// INK_DC_STEP tokens: prefill up to p with taps, commit the context (the newest 1023 positions), draft INK_DC_DEPTH
+/// (default 3) proposals after the anchor toks[p], verify them, and count how many lead the target's greedy choices.
+fn dcheck(o: &Opts) {
+    let eng = Engine::load(&o.model, o.ctx);
+    eng.reserve(o.ctx, false); eng.ensure_batch(eng.chunk);
+    let d = engine::Drafter::load(&eng.gpu, &o.reference);
+    let tk = Tokenizer::load(&eng.g);
+    let toks = tk.encode(&o.prompt, true);
+    let depth: usize = std::env::var("INK_DC_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let step: usize = std::env::var("INK_DC_STEP").ok().and_then(|v| v.parse().ok()).unwrap_or(97);
+    let am = |v: &[f32]| v.iter().enumerate().fold((0u32, f32::MIN), |b, (i, &x)| if x > b.1 { (i as u32, x) } else { b }).0;
+    let (mut cycles, mut reach, mut tx) = (0usize, vec![0usize; depth + 1], vec![0usize; depth]);
+    let t0 = std::time::Instant::now();
+    // only positions inside the model's own messages (what the drafter was trained to predict), unless INK_DC_ALL
+    let sid = |name: &str| (0..eng.n_vocab as u32).find(|&i| tk.is_special(i) && tk.decode_bytes(i) == name.as_bytes());
+    let mm = sid("<|message_model|>");
+    let starts: Vec<u32> = ["<|message_user|>", "<|message_system|>", "<|message_tool|>"].iter().filter_map(|n| sid(n)).collect();
+    let mut inside = vec![false; toks.len()];
+    let mut on = false;
+    for (i, &t) in toks.iter().enumerate() { if Some(t) == mm { on = true; } else if starts.contains(&t) { on = false; } inside[i] = on; }
+    let all = std::env::var("INK_DC_ALL").is_ok();
+    let mut last = 0usize;
+    for p in 64..toks.len() - depth - 2 {
+        if p < last + step || !(all || inside[p..=p + depth].iter().all(|&x| x)) { continue; }
+        last = p;
+        eng.taps_on.set(true); eng.tap_from.set(p.saturating_sub(1024));
+        eng.reset(); eng.set_tokens(0, &toks);
+        let mut q = 0;
+        while q < p { let m = (p - q).min(eng.chunk); let cb = eng.gpu.cmd(); eng.encode_prefill(&cb, q, m, false, false); cb.commit(); cb.waitUntilCompleted(); q += m; }
+        eng.taps_on.set(false);
+        eng.draft_reset();
+        let c0 = p.saturating_sub(1023);
+        let cb = eng.gpu.cmd();
+        eng.encode_draft_commit(&d, &cb, c0, p - c0);
+        eng.encode_draft(&d, &cb, p, depth, None);
+        cb.commit(); cb.waitUntilCompleted();
+        let props: Vec<u32> = (0..depth).map(|i| eng.token_at(p + 1 + i)).collect();
+        let cb = eng.gpu.cmd(); eng.encode_verify(&cb, p, depth + 1); cb.commit(); cb.waitUntilCompleted();
+        let tgt: Vec<u32> = (0..depth).map(|i| am(eng.verify_logits(i))).collect();
+        let mut a = 0;
+        while a < depth && props[a] == tgt[a] { a += 1; }
+        for i in 0..=a { reach[i] += 1; }
+        for i in 0..depth { tx[i] += (props[i] == toks[p + 1 + i]) as usize; }
+        cycles += 1;
+        if cycles <= 3 { println!("p={p}: proposals {:?} target {:?} transcript {:?}", props, tgt, &toks[p + 1..p + 1 + depth]); }
+        eng.set_tokens(p + 1, &toks[p + 1..p + 1 + depth]);
+    }
+    let tpc = 1.0 + (1..=depth).map(|i| reach[i] as f64).sum::<f64>() / cycles as f64;
+    let cond: Vec<String> = (1..=depth).map(|i| format!("{:.1}%", 100.0 * reach[i] as f64 / reach[i - 1].max(1) as f64)).collect();
+    let txr: Vec<String> = tx.iter().map(|&m| format!("{:.1}%", 100.0 * m as f64 / cycles as f64)).collect();
+    println!("{cycles} cycles, depth {depth}: {tpc:.2} tokens per cycle (greedy); acceptance by depth, given the one before: {}",
+             cond.join(" / "));
+    println!("  proposals equal to the transcript's own next tokens: {} ({:.0} s)", txr.join(" / "), t0.elapsed().as_secs_f64());
+}
+
+/// dev (DSPARK.md): -n tokens with speculative decoding (drafter --ref, depth INK_DC_DEPTH, default 3) against plain
+/// GPU-chained decoding from the same prompt (-f/-p; --raw or the chat template) and seed (--temp, --seed; 0 = greedy).
+/// The two differ only where the verify pass's logits and a decode step's round differently, so the first difference
+/// shows whether rollback keeps the state right. Prints both speeds.
+fn spectest(o: &Opts) {
+    let eng = Engine::load(&o.model, o.ctx);
+    eng.reserve(o.ctx, false); eng.ensure_batch(eng.chunk);
+    let d = engine::Drafter::load(&eng.gpu, &o.reference);
+    let tk = Tokenizer::load(&eng.g);
+    let text = if o.raw { o.prompt.clone() } else { first_turn(o, &o.prompt) };
+    let toks = tk.encode(&text, true);
+    let (np, ng) = (toks.len(), o.n);
+    let depth: usize = std::env::var("INK_DC_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let samp = (o.temp > 0.0).then(|| engine::SampArgs { n: eng.n_vocab as u32, seed_lo: o.seed as u32, seed_hi: (o.seed >> 32) as u32,
+        think: u32::MAX, end: u32::MAX, budget: 0, state: eng.max_ctx as u32, temp: o.temp, softcap: eng.softcap, ..Default::default() });
+    let prefill = |taps: bool| {
+        eng.reset(); eng.set_tokens(0, &toks); eng.set_tokens(eng.max_ctx, &[0, 0, 0]);
+        eng.taps_on.set(taps); eng.tap_from.set(np.saturating_sub(1024));
+        let mut q = 0;
+        while q < np { let m = (np - q).min(eng.chunk); let cb = eng.gpu.cmd(); eng.encode_prefill(&cb, q, m, true, false); cb.commit(); cb.waitUntilCompleted(); q += m; }
+        eng.samp.set(samp);
+        let cb = eng.gpu.cmd(); eng.encode_sample(&cb, np - 1); cb.commit(); cb.waitUntilCompleted();
+    };
+    // A: plain, chained on the GPU
+    prefill(false);
+    let t0 = std::time::Instant::now();
+    let cb = eng.gpu.cmd();
+    for i in 0..ng - 1 { eng.encode_step(&cb, np + i, true, true); }
+    cb.commit(); cb.waitUntilCompleted();
+    let ta = t0.elapsed().as_secs_f64();
+    let a: Vec<u32> = (0..ng).map(|i| eng.token_at(np + i)).collect();
+    eng.samp.set(None);
+    // B: speculative
+    prefill(true);
+    eng.draft_reset();
+    let c0 = np.saturating_sub(1023);
+    let cb = eng.gpu.cmd(); eng.encode_draft_commit(&d, &cb, c0, np - c0); cb.commit(); cb.waitUntilCompleted();
+    eng.samp.set(None);
+    let t0 = std::time::Instant::now();
+    let (mut q, mut out, mut cycles, mut pending) = (np, vec![eng.token_at(np)], 0usize, 0usize);
+    // time split (INK_ST_SPLIT: draft and verify in separate command buffers, to time each on the GPU)
+    let split = std::env::var("INK_ST_SPLIT").is_ok();
+    let (mut g_draft, mut g_verify, mut g_all, mut c_save, mut c_roll) = (0f64, 0f64, 0f64, 0f64, 0f64);
+    let gpu_ms = |cb: &crate::metal::CmdBuf| (cb.GPUEndTime() - cb.GPUStartTime()) * 1e3;
+    while out.len() < ng {
+        let tc = std::time::Instant::now();
+        let saved = eng.swa_save(q, depth + 1);
+        c_save += tc.elapsed().as_secs_f64() * 1e3;
+        let cb = eng.gpu.cmd();
+        if pending > 0 { eng.encode_draft_commit(&d, &cb, q - pending, pending); }
+        eng.encode_draft(&d, &cb, q, depth, samp);
+        if split { cb.commit(); cb.waitUntilCompleted(); g_draft += gpu_ms(&cb); }
+        let cb2 = if split { eng.gpu.cmd() } else { cb.clone() };
+        eng.encode_verify(&cb2, q, depth + 1);
+        // standard speculative sampling when sampling (INK_SPEC_COUPLED=1: the coupled-Gumbel test instead)
+        match samp { Some(sa) if std::env::var("INK_SPEC_COUPLED").is_err() => eng.encode_verify_spec(&cb2, q, depth, sa),
+                     _ => eng.encode_verify_sample(&cb2, q, depth + 1, samp) }
+        cb2.commit(); cb2.waitUntilCompleted();
+        if split { g_verify += gpu_ms(&cb2); } else { g_all += gpu_ms(&cb2); }
+        let tgt: Vec<u32> = (0..=depth).map(|i| eng.verify_token(i)).collect();
+        let mut acc = 0;
+        while acc < depth && eng.token_at(q + 1 + acc) == tgt[acc] { acc += 1; }
+        let keep = acc + 1;
+        out.extend_from_slice(&tgt[..keep]);
+        let tr = std::time::Instant::now();
+        eng.verify_rollback(&saved, q, depth + 1, keep);
+        c_roll += tr.elapsed().as_secs_f64() * 1e3;
+        eng.set_tokens(q + keep, &[tgt[acc]]);
+        pending = keep;
+        q += keep;
+        cycles += 1;
+    }
+    let tb = t0.elapsed().as_secs_f64();
+    out.truncate(ng);
+    let diff = a.iter().zip(&out).position(|(x, y)| x != y);
+    println!("plain: {ng} tokens in {ta:.2} s ({:.1} tok/s); speculative: {} cycles, {:.2} tokens per cycle, {tb:.2} s ({:.1} tok/s, {:.2}x)",
+             ng as f64 / ta, cycles, ng as f64 / cycles as f64, ng as f64 / tb, ta / tb);
+    match diff { None => println!("identical over all {ng} tokens"), Some(i) => println!("first difference at token {i} of {ng}") }
+    let c = cycles as f64;
+    if split { println!("per cycle: GPU draft {:.2} ms, GPU verify {:.2} ms", g_draft / c, g_verify / c); } else { println!("per cycle: GPU {:.2} ms", g_all / c); }
+    println!("per cycle: wall {:.2} ms, CPU ring save {:.3} ms, CPU rollback {:.3} ms", tb * 1e3 / c, c_save / c, c_roll / c);
+    if let Some(i) = diff {
+        let w = |v: &[u32]| String::from_utf8_lossy(&v.iter().flat_map(|&t| tk.decode_bytes(t)).collect::<Vec<u8>>()).to_string();
+        let lo = i.saturating_sub(12);
+        println!("around the difference: plain {:?} | spec {:?}", w(&a[lo..(i + 12).min(ng)]), w(&out[lo..(i + 12).min(ng)]));
+    }
+    println!("plain: {:?}", String::from_utf8_lossy(&a[..ng.min(60)].iter().flat_map(|&t| tk.decode_bytes(t)).collect::<Vec<u8>>()).chars().take(300).collect::<String>());
+    println!("spec:  {:?}", String::from_utf8_lossy(&out[..ng.min(60)].iter().flat_map(|&t| tk.decode_bytes(t)).collect::<Vec<u8>>()).chars().take(300).collect::<String>());
+}
+
 fn prof_pf(o: &Opts) {
     let eng = Engine::load(&o.model, o.ctx);
     eng.reserve(o.ctx, false); eng.ensure_batch(eng.chunk);      // dev tool: everything pre-allocated
@@ -449,6 +705,7 @@ fn vcost(o: &Opts) {
 fn main() {
     let (cmd, o) = parse();
     match cmd.as_str() {
+        "serve" => serve::run(&o.model, o.ctx, &o.reference),
         "check" => check(&o),
         "binv" => binv(&o),
         "debug" => debug(&o),
@@ -456,6 +713,11 @@ fn main() {
         "routes" => routes(&o),
         "vcost" => vcost(&o),
         "prof_pf" => prof_pf(&o),
+        "prof_verify" => prof_verify(&o),
+        "tapcheck" => tapcheck(&o),
+        "dcheck" => dcheck(&o),
+        "spectest" => spectest(&o),
+        "kcheck" => { let eng = Engine::load(&o.model, o.ctx); for t in [2usize, 4, 8] { eng.kcheck(t); } }
         "kmoe" => {
             let eng = Engine::load(&o.model, 4096);
 
